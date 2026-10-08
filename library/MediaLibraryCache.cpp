@@ -1772,7 +1772,9 @@ void MediaLibraryCache::_ScanAndAddFile(const BString &pathStr) {
   }
 }
 
-void MediaLibraryCache::_RemoveFileFromCache(const BString &pathStr) {
+void MediaLibraryCache::_RemoveFileFromCache(const BString &pathRef) {
+  // Copy first: callers may pass the key of the very entry erased below.
+  const BString pathStr(pathRef);
   auto it = fEntries.find(pathStr);
   if (it != fEntries.end()) {
     fEntries.erase(it);
