@@ -92,9 +92,19 @@ bool LibraryMessageHandler::HandleMessage(BMessage *msg) {
         fWindow->fCurrentPlaylistName == folder && fWindow->fLibraryManager) {
       MediaTableView *cv = fWindow->fLibraryManager->ContentView();
       if (cv) {
-        int32 index = -1;
-        msg->FindInt32("index", &index);
-        cv->AddEntry(MediaTableView::UnarchiveItem(msg), index);
+        // The file may already be back with its row, e.g. restored from the
+        // Trash by Tracker before this Undo; don't show it twice.
+        MediaItem item = MediaTableView::UnarchiveItem(msg);
+        bool present = false;
+        for (int32 i = 0; i < cv->CountRows() && !present; ++i) {
+          const MediaItem *mi = cv->ItemAt(i);
+          present = mi && mi->path == item.path;
+        }
+        if (!present) {
+          int32 index = -1;
+          msg->FindInt32("index", &index);
+          cv->AddEntry(item, index);
+        }
       }
     }
     break;

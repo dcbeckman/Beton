@@ -1582,7 +1582,44 @@ void MediaLibraryCache::_WatchDirRecursive(BDirectory &dir) {
   }
 }
 
+bool MediaLibraryCache::_IsWatched(const node_ref &nref) const {
+  for (const auto &w : fWatchedNodes) {
+    if (w == nref)
+      return true;
+  }
+  return false;
+}
+
+/**
+ * @brief Picks up an entry that appeared in a watched folder, by creation or
+ * by being moved in.
+ */
+void MediaLibraryCache::_HandleEntryArrived(const entry_ref &ref) {
+  BEntry entry(&ref, true);
+  if (!entry.Exists())
+    return;
+
+  if (entry.IsDirectory()) {
+    BDirectory dir(&entry);
+    _WatchDirRecursive(dir);
+  } else if (entry.IsFile()) {
+    BPath path(&ref);
+    if (path.InitCheck() == B_OK && _IsSupportedAudioFile(path.Path())) {
+      node_ref fileRef;
+      if (entry.GetNodeRef(&fileRef) == B_OK && !_IsWatched(fileRef) &&
+          watch_node(&fileRef, B_WATCH_STAT, this) == B_OK) {
+        fWatchedNodes.push_back(fileRef);
+      }
+      _ScanAndAddFile(path.Path());
+    }
+  }
+}
+
 void MediaLibraryCache::_HandleNodeMonitor(BMessage *msg, int32 opcode) {
+  int64 nodeDbg = -1;
+  msg->FindInt64("node", &nodeDbg);
+  DEBUG_PRINT("node monitor opcode %ld node %lld\n", (long)opcode,
+              (long long)nodeDbg);
   switch (opcode) {
     case B_ENTRY_CREATED: {
       dev_t device;
@@ -1591,30 +1628,7 @@ void MediaLibraryCache::_HandleNodeMonitor(BMessage *msg, int32 opcode) {
       if (msg->FindInt32("device", &device) == B_OK &&
           msg->FindInt64("directory", &directory) == B_OK &&
           msg->FindString("name", &name) == B_OK) {
-        entry_ref ref(device, directory, name);
-        BEntry entry(&ref, true);
-        if (entry.Exists()) {
-          if (entry.IsDirectory()) {
-            node_ref nref;
-            if (entry.GetNodeRef(&nref) == B_OK) {
-              if (watch_node(&nref, B_WATCH_DIRECTORY | B_WATCH_NAME, this) == B_OK) {
-                fWatchedNodes.push_back(nref);
-                BDirectory dir(&entry);
-                _WatchDirRecursive(dir);
-              }
-            }
-          } else if (entry.IsFile()) {
-            BPath path(&ref);
-            if (path.InitCheck() == B_OK && _IsSupportedAudioFile(path.Path())) {
-              node_ref fileRef;
-              if (entry.GetNodeRef(&fileRef) == B_OK) {
-                watch_node(&fileRef, B_WATCH_STAT, this);
-                fWatchedNodes.push_back(fileRef);
-              }
-              _ScanAndAddFile(path.Path());
-            }
-          }
-        }
+        _HandleEntryArrived(entry_ref(device, directory, name));
       }
       break;
     }
@@ -1636,14 +1650,14 @@ void MediaLibraryCache::_HandleNodeMonitor(BMessage *msg, int32 opcode) {
       dev_t device;
       ino_t fromDir;
       ino_t toDir;
-      const char *fromName = nullptr;
       const char *toName = nullptr;
       ino_t node;
+      // Field names as the kernel sends them (node_monitor.cpp): with spaces,
+      // and the new name is plain "name".
       if (msg->FindInt32("device", &device) == B_OK &&
-          msg->FindInt64("from_directory", &fromDir) == B_OK &&
-          msg->FindInt64("to_directory", &toDir) == B_OK &&
-          msg->FindString("from_name", &fromName) == B_OK &&
-          msg->FindString("to_name", &toName) == B_OK &&
+          msg->FindInt64("from directory", &fromDir) == B_OK &&
+          msg->FindInt64("to directory", &toDir) == B_OK &&
+          msg->FindString("name", &toName) == B_OK &&
           msg->FindInt64("node", &node) == B_OK) {
         
         BString oldPath;
@@ -1656,6 +1670,21 @@ void MediaLibraryCache::_HandleNodeMonitor(BMessage *msg, int32 opcode) {
             found = true;
             break;
           }
+        }
+
+        // A move INTO a watched folder -- Tracker's Restore from Trash, a drag
+        // from another folder, a rename in place -- is an arrival: drop the old
+        // record (the window drops its item with it) and scan the file at its
+        // new path, which adds the row. Only rekeying would leave the window,
+        // which ignores MSG_FILE_MOVED, without a row for it.
+        node_ref toDirRef;
+        toDirRef.device = device;
+        toDirRef.node = toDir;
+        if (_IsWatched(toDirRef)) {
+          if (found)
+            _RemoveFileFromCache(oldPath);
+          _HandleEntryArrived(entry_ref(device, toDir, toName));
+          break;
         }
 
         if (found) {

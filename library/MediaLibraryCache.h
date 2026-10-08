@@ -257,6 +257,8 @@ private:
 
   void _WatchDirRecursive(BDirectory &dir);
   void _HandleNodeMonitor(BMessage *msg, int32 opcode);
+  void _HandleEntryArrived(const entry_ref &ref);
+  bool _IsWatched(const node_ref &nref) const;
   void _ScanAndAddFile(const BString &pathStr);
   void _RemoveFileFromCache(const BString &pathStr);
   static bool _IsSupportedAudioFile(const BString &path);
