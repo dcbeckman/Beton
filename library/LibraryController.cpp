@@ -17,11 +17,14 @@
 #include <NumberFormat.h>
 #include <MessageRunner.h>
 #include <Entry.h>
+#include <FindDirectory.h>
 #include <Messenger.h>
+#include <Node.h>
 #include <OS.h>
 #include <Path.h>
 #include <Roster.h>
 #include <TextView.h>
+#include <Volume.h>
 #include <algorithm>
 #include <map>
 #include <set>
@@ -39,6 +42,29 @@ LibraryController::~LibraryController() { _StopScanStatusTimer(); }
 void LibraryController::ShowDirectoryManager() {
   MusicSourceManagerWindow *win = new MusicSourceManagerWindow(fWindow->fMediaLibraryCache);
   win->Show();
+}
+
+// Tracker's restore-from-Trash attribute (kAttrOriginalPath in Haiku's
+// src/kits/tracker/Attributes.h; private, so not includable).
+static const char *kAttrOriginalPath = "_trk/original_path";
+
+/**
+ * @brief Returns true if @a dir is the Trash of the volume it lives on.
+ */
+static bool _IsTrashDirectory(const BDirectory &dir) {
+  node_ref dirRef;
+  if (dir.GetNodeRef(&dirRef) != B_OK)
+    return false;
+
+  BVolume volume(dirRef.device);
+  BPath trashPath;
+  if (volume.InitCheck() != B_OK ||
+      find_directory(B_TRASH_DIRECTORY, &trashPath, false, &volume) != B_OK)
+    return false;
+
+  node_ref trashRef;
+  BDirectory trash(trashPath.Path());
+  return trash.GetNodeRef(&trashRef) == B_OK && trashRef == dirRef;
 }
 
 /**
@@ -78,12 +104,30 @@ void LibraryController::HandleFileMove(BMessage *msg) {
     return;
   }
 
+  BPath originalPath;
+  entry.GetPath(&originalPath);
+
   status_t st = entry.MoveTo(&dir, toPath.Leaf(), false);
   if (st != B_OK) {
     BString status(B_TRANSLATE("Move failed: "));
     status << strerror(st);
     fWindow->UpdateStatus(status);
     return;
+  }
+
+  // Keep Tracker's "Restore" working: it reads the original location from
+  // _trk/original_path, so set it on the way into the Trash and clear it on
+  // the way out (undo), as Tracker itself does.
+  BNode node(&entry);
+  if (node.InitCheck() == B_OK) {
+    if (_IsTrashDirectory(dir)) {
+      BString original(originalPath.Path());
+      if (node.WriteAttrString(kAttrOriginalPath, &original) != B_OK)
+        DEBUG_PRINT("could not write %s on %s\n", kAttrOriginalPath,
+                    toPath.Path());
+    } else {
+      node.RemoveAttr(kAttrOriginalPath);
+    }
   }
 
   BString newPath = toPath.Path();
