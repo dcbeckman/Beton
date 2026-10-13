@@ -19,6 +19,7 @@
 #include <Message.h>
 #include <MessageRunner.h>
 #include <OS.h>
+#include <Path.h>
 #include <Slider.h>
 #include <String.h>
 #include <StringView.h>
@@ -267,6 +268,30 @@ PlaybackTransportController::HandleNowPlaying(BMessage *msg)
   fWindow->UpdateFileInfo();
   if (fWindow->fArtworkController)
     fWindow->fArtworkController->FetchNowPlayingCover(path, isStream);
+}
+
+/**
+ * @brief Resets the transport when the engine could not open a track.
+ */
+void
+PlaybackTransportController::HandlePlayFailed(BMessage *msg)
+{
+  if (!fWindow || !msg)
+    return;
+
+  // Stale if something else has started since.
+  AudioPlaybackEngine *engine = fWindow->fPlaybackEngine;
+  if (engine && (engine->IsPlaying() || engine->IsPaused()))
+    return;
+
+  BString path;
+  msg->FindString("path", &path);
+
+  StopPlayback();
+
+  BString status(B_TRANSLATE("Could not play %file%"));
+  status.ReplaceFirst("%file%", BPath(path.String()).Leaf());
+  fWindow->UpdateStatus(status);
 }
 
 /**

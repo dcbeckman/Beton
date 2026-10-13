@@ -299,6 +299,7 @@ private:
 
   void _StartPrebufferThread(int frameSize);
   void _StopPrebufferThread();
+  void _NotifyPlayFailed(const char *path);
   void _PrebufferThreadFunc();
   static int32 _PrebufferThreadEntry(void *cookie);
 

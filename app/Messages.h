@@ -48,6 +48,7 @@
 #define MSG_TIME_UPDATE 'tmuc'    ///< Periodic playback time update.
 #define MSG_TRACK_ENDED 'tend'    ///< Current track finished playing.
 #define MSG_NOW_PLAYING 'nply'    ///< Notification of new track playing.
+#define MSG_PLAY_FAILED 'pfld'    ///< A queued track could not be opened.
 #define MSG_PLAY_BTN 'plyB'       ///< Play button clicked.
 #define MSG_PREV_BTN 'prvB'       ///< Previous button clicked.
 #define MSG_SHUFFLE_TOGGLE 'shuf' ///< Toggle shuffle mode.

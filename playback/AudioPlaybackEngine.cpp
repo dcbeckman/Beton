@@ -669,6 +669,14 @@ void AudioPlaybackEngine::_SilenceMidi() {
   fMidiSynth->SetVolume(0.0);
 }
 
+void AudioPlaybackEngine::_NotifyPlayFailed(const char *path) {
+  if (!fTarget.IsValid())
+    return;
+  BMessage m(MSG_PLAY_FAILED);
+  m.AddString("path", path);
+  fTarget.SendMessage(&m);
+}
+
 void AudioPlaybackEngine::_StartPrebufferThread(int frameSize) {
   _StopPrebufferThread();
   fPrebufferFrameSize = frameSize > 0 ? frameSize : 4;
@@ -841,6 +849,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
   if (st != B_OK) {
     DEBUG_PRINT("get_ref_for_path failed: %s (%ld)\n", strerror(st),
                 (long)st);
+    _NotifyPlayFailed(path);
     return;
   }
 
@@ -852,6 +861,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
       DEBUG_PRINT("BMidiSynthFile::LoadFile failed: %s (%ld)\n",
                   strerror(st), (long)st);
       _CleanupMedia();
+      _NotifyPlayFailed(path);
       return;
     }
 
@@ -875,6 +885,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
       DEBUG_PRINT("BMidiSynthFile::Start failed: %s (%ld)\n",
                   strerror(st), (long)st);
       _CleanupMedia();
+      _NotifyPlayFailed(path);
       return;
     }
 
@@ -896,6 +907,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
     DEBUG_PRINT("BMediaFile::InitCheck failed: %s (%ld)\n",
                 strerror(st), (long)st);
     _CleanupMedia();
+    _NotifyPlayFailed(path);
     return;
   }
 
@@ -903,6 +915,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
   if (!fTrack) {
     DEBUG_PRINT("TrackAt(0) returned nullptr\n");
     _CleanupMedia();
+    _NotifyPlayFailed(path);
     return;
   }
 
@@ -933,6 +946,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
     DEBUG_PRINT("DecodedFormat failed: %s (%ld)\n", strerror(st),
                 (long)st);
     _CleanupMedia();
+    _NotifyPlayFailed(path);
     return;
   }
 
@@ -1035,6 +1049,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
   if (!fPlayer || fPlayer->InitCheck() != B_OK) {
     DEBUG_PRINT("BSoundPlayer new/init failed\n");
     _CleanupMedia();
+    _NotifyPlayFailed(path);
     return;
   }
 

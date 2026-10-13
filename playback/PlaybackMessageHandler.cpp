@@ -115,6 +115,12 @@ bool PlaybackMessageHandler::HandleMessage(BMessage *msg) {
     break;
   }
 
+  case MSG_PLAY_FAILED: {
+    if (fWindow->fPlaybackTransportController)
+      fWindow->fPlaybackTransportController->HandlePlayFailed(msg);
+    break;
+  }
+
   default:
     return false;
   }
