@@ -673,6 +673,8 @@ void AudioPlaybackEngine::_StartPrebufferThread(int frameSize) {
   _StopPrebufferThread();
   fPrebufferFrameSize = frameSize > 0 ? frameSize : 4;
   fReaderEof.store(false, std::memory_order_relaxed);
+  fPendingSeek.store(-1, std::memory_order_relaxed);
+  fFlushRequested.store(false, std::memory_order_relaxed);
   fPrebufferRing.Init(524288);
   fPrebufferRunning.store(true, std::memory_order_relaxed);
   fPrebufferThread = spawn_thread(_PrebufferThreadEntry, "cd_prebuffer", B_NORMAL_PRIORITY, this);
@@ -708,6 +710,23 @@ void AudioPlaybackEngine::_PrebufferThreadFunc() {
   const size_t kBytesPerRead = (size_t)kFramesPerRead * frameSize;
   std::vector<uint8> scratch(kBytesPerRead);
   while (fPrebufferRunning.load(std::memory_order_relaxed)) {
+    // Seeks are done here, by the only thread that reads fTrack. Everything
+    // already in the ring was decoded before the seek; mark it for the
+    // callback to drop, or it would play out first (up to 3 s of it).
+    bigtime_t seekTo = fPendingSeek.exchange(-1, std::memory_order_relaxed);
+    if (seekTo >= 0 && fTrack) {
+      if (fTrack->SeekToTime(&seekTo, B_MEDIA_SEEK_CLOSEST_BACKWARD) == B_OK) {
+        while (fFlushSpin.test_and_set(std::memory_order_acquire))
+          ;
+        fFlushTo = fPrebufferRing.WritePos();
+        fFlushPos = seekTo;
+        fFlushRequested.store(true, std::memory_order_relaxed);
+        fFlushSpin.clear(std::memory_order_release);
+        fReaderEof.store(false, std::memory_order_relaxed);
+      }
+      continue;
+    }
+
     if (!fReaderEof.load(std::memory_order_relaxed) &&
         fPrebufferRing.AvailableWrite() >= kBytesPerRead) {
       int64 framesToRead = kFramesPerRead;
@@ -1564,6 +1583,14 @@ void AudioPlaybackEngine::SeekTo(bigtime_t pos) {
   if (!fTrack || fIsStreaming.load(std::memory_order_relaxed) || fIsMidiPlaying)
     return;
 
+  // The prebuffer thread is reading fTrack; hand the seek to it. The position
+  // is corrected to the frame actually reached when the callback picks it up.
+  if (fUsePrebuffer.load(std::memory_order_relaxed)) {
+    fPendingSeek.store(pos, std::memory_order_relaxed);
+    fCurrentPos = pos;
+    return;
+  }
+
   bigtime_t newTime = pos;
   status_t ret = fTrack->SeekToTime(&newTime, B_MEDIA_SEEK_CLOSEST_BACKWARD);
   if (ret == B_OK) {
@@ -1785,6 +1812,14 @@ void AudioPlaybackEngine::_PlayBuffer(
 #endif
 
   if (self->fUsePrebuffer.load(std::memory_order_relaxed)) {
+    if (self->fFlushRequested.load(std::memory_order_relaxed)) {
+      while (self->fFlushSpin.test_and_set(std::memory_order_acquire))
+        ;
+      self->fPrebufferRing.DiscardTo(self->fFlushTo);
+      self->fCurrentPos = self->fFlushPos;
+      self->fFlushRequested.store(false, std::memory_order_relaxed);
+      self->fFlushSpin.clear(std::memory_order_release);
+    }
     size_t readBytes = self->fPrebufferRing.Read((uint8 *)buffer, size);
     if (readBytes > 0) {
       self->fZeroReadCount.store(0, std::memory_order_relaxed);

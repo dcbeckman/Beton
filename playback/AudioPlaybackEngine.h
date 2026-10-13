@@ -94,6 +94,16 @@ struct AudioRingBuffer {
     return count;
   }
 
+  /** @brief Current write position. Writer side only. */
+  size_t WritePos() const {
+    return writeHead.load(std::memory_order_relaxed);
+  }
+
+  /** @brief Drops everything before @a pos. Reader side only. */
+  void DiscardTo(size_t pos) {
+    readHead.store(pos, std::memory_order_release);
+  }
+
   void Reset() {
     writeHead.store(0, std::memory_order_relaxed);
     readHead.store(0, std::memory_order_relaxed);
@@ -273,6 +283,15 @@ private:
   std::atomic<bool> fUsePrebuffer{false};
   std::atomic<bool> fPrebufferRunning{false};
   std::atomic<bool> fReaderEof{false};
+  /// Seek waiting for the prebuffer thread, which owns fTrack; -1 if none.
+  std::atomic<bigtime_t> fPendingSeek{-1};
+  /// Set by the prebuffer thread after a seek: the callback drops the ring
+  /// up to fFlushTo, i.e. the audio decoded before the seek, and takes
+  /// fFlushPos as the position. fFlushSpin keeps the three consistent.
+  std::atomic<bool> fFlushRequested{false};
+  size_t fFlushTo = 0;
+  bigtime_t fFlushPos = 0;
+  std::atomic_flag fFlushSpin = ATOMIC_FLAG_INIT;
   thread_id fPrebufferThread = -1;
   int fPrebufferFrameSize = 4; ///< Native decoded-track frame size (bytes);
                                 ///< set before the thread starts, read only
