@@ -816,6 +816,21 @@ bool MetadataTagIO::IsBeFsVolume(const BPath &path) {
   return strcmp(info.fsh_name, "bfs") == 0;
 }
 
+/**
+ * @brief Checks whether a file is a track of a mounted audio CD.
+ */
+bool MetadataTagIO::IsCddaVolume(const BPath &path) {
+  entry_ref ref;
+  if (get_ref_for_path(path.Path(), &ref) != B_OK)
+    return false;
+
+  fs_info info{};
+  if (fs_stat_dev(ref.device, &info) != 0)
+    return false;
+
+  return strcmp(info.fsh_name, "cdda") == 0;
+}
+
 static bool write_attr_int(BNode &n, const char *name, int32 v) {
   return n.WriteAttr(name, B_INT32_TYPE, 0, &v, sizeof(v)) ==
          (ssize_t)sizeof(v);

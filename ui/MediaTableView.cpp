@@ -430,6 +430,9 @@ public:
     if (bytes[0] != B_LEFT_ARROW && bytes[0] != B_RIGHT_ARROW)
       return B_DISPATCH_MESSAGE;
 
+    if (!fOwner->fRatingEditable)
+      return B_DISPATCH_MESSAGE;
+
     int32 modifiers = 0;
     msg->FindInt32("modifiers", &modifiers);
     if (modifiers & (B_OPTION_KEY | B_COMMAND_KEY | B_CONTROL_KEY))
@@ -1863,8 +1866,8 @@ void MediaTableView::MessageReceived(BMessage *msg) {
       BMessage filesMsg;
       BuildFilesMessage(this, filesMsg);
 
-      bool isReadOnly = false;
-      {
+      bool isReadOnly = !fRatingEditable;
+      if (!isReadOnly) {
         int32 i = 0;
         entry_ref ref;
         while (filesMsg.FindRef("refs", i++, &ref) == B_OK) {

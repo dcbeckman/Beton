@@ -279,6 +279,13 @@ bool WriteBfsAttributes(const BPath &path, const TagData &in,
 bool IsBeFsVolume(const BPath &path);
 
 /**
+ * @brief Checks if the file is a track of a mounted audio CD.
+ * @param path The path to check.
+ * @return True if on a cdda volume, false otherwise.
+ */
+bool IsCddaVolume(const BPath &path);
+
+/**
  * @brief Applies sync by writing source data to the appropriate destination.
  * @param path The file to sync.
  * @param source The TagData to write.

@@ -55,7 +55,7 @@ void PlaylistSelectionController::HandlePlaylistSelection(BMessage *msg) {
   fWindow->fIsDlnaMode = (kind == PlaylistItemKind::DLNA);
   fWindow->fIsCDMode = (kind == PlaylistItemKind::CD);
 
-  // Fast Edit makes no sense for Radio/DLNA/CD (read-only metadata).
+  // Fast Edit and rating make no sense for Radio/DLNA/CD (read-only metadata).
   // Temporarily disable it without touching fFastEditEnabled so the user's
   // preference is restored when switching back to an editable source.
   {
@@ -66,6 +66,7 @@ void PlaylistSelectionController::HandlePlaylistSelection(BMessage *msg) {
       if (!effective)
         cv->CommitCellEdit();
       cv->SetFastEditEnabled(effective);
+      cv->SetRatingEditable(editable);
     }
     if (fWindow->fFastEditItem)
       fWindow->fFastEditItem->SetMarked(effective);

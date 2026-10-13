@@ -121,6 +121,12 @@ public:
   }
   bool FastEditEnabled() const { return fFastEditEnabled; }
 
+  /**
+   * @brief Allows or blocks rating changes from the keyboard and context menu.
+   * Off for sources whose tracks cannot take one (Radio, DLNA, Audio CD).
+   */
+  void SetRatingEditable(bool editable) { fRatingEditable = editable; }
+
   void SetFolderMode(bool folderMode) { fFolderMode = folderMode; }
 
   void SaveState(BMessage *msg);
@@ -214,6 +220,7 @@ private:
   /** @name Cell Inline Editing */
   ///@{
   bool fFastEditEnabled{false};
+  bool fRatingEditable{true};
   bool fFolderMode{false};
   CellTextControl *fActiveEditor{nullptr};
   BRow *fEditingRow{nullptr};
