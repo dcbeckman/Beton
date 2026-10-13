@@ -48,10 +48,10 @@ static BBitmap *LoadSystemCDIcon(float size, const char *cdPath) {
   bool found = false;
 
   if (cdPath && cdPath[0] != '\0') {
-    BEntry entry(cdPath);
-    entry_ref ref;
-    if (entry.GetRef(&ref) == B_OK) {
-      vol.SetTo(ref.device);
+    // Not via an entry_ref: for a mount point that names the parent's volume.
+    dev_t device = dev_for_path(cdPath);
+    if (device >= 0) {
+      vol.SetTo(device);
       if (vol.InitCheck() == B_OK) {
         found = true;
       }
