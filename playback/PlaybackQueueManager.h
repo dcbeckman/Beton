@@ -2,8 +2,12 @@
 #define BETON_PLAYBACK_QUEUE_MANAGER_H
 
 #include <SupportDefs.h>
+#include <String.h>
+#include <map>
 #include <random>
 #include <vector>
+
+#include "MediaItem.h"
 
 class MediaTableView;
 class MainWindow;
@@ -71,6 +75,12 @@ public:
   /** @brief Plays a concrete local row selection from content view. */
   void PlayLocalSelection(MediaTableView *view, int32 rowIndex);
 
+  /**
+   * @brief Details of a queued track that is not in the library index
+   * (audio CD, folder outside the library), or nullptr.
+   */
+  const MediaItem *QueueItemForPath(const BString &path) const;
+
 private:
   /** @brief Returns random queue index in range `[0, count)`. */
   int32 _RandomIndex(int32 count);
@@ -104,6 +114,9 @@ private:
   
   /** @brief Stack-like history for shuffle previous navigation. */
   std::vector<int32> fShuffleHistory;
+
+  /** @brief Queued tracks the library index does not know, by path. */
+  std::map<BString, MediaItem> fQueueItems;
 };
 
 #endif // BETON_PLAYBACK_QUEUE_MANAGER_H

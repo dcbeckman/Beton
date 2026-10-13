@@ -345,6 +345,13 @@ PlaybackQueueManager::PlayCurrentSelection()
   }
 }
 
+const MediaItem *
+PlaybackQueueManager::QueueItemForPath(const BString &path) const
+{
+  auto it = fQueueItems.find(path);
+  return it != fQueueItems.end() ? &it->second : nullptr;
+}
+
 void
 PlaybackQueueManager::PlayLocalSelection(MediaTableView *view,
                                             int32 rowIndex)
@@ -366,6 +373,15 @@ PlaybackQueueManager::PlayLocalSelection(MediaTableView *view,
 
   if (queue.empty())
     return;
+
+  // Now-playing details come from the library index; keep our own copy for
+  // tracks it does not hold, so they survive the view being reloaded.
+  fQueueItems.clear();
+  for (int32 i = 0; i < view->CountRows(); ++i) {
+    const MediaItem *mi = view->ItemAt(i);
+    if (mi && fWindow->fPathIndex.find(mi->path) == fWindow->fPathIndex.end())
+      fQueueItems[mi->path] = *mi;
+  }
 
   int32 queueIdx = QueueIndexForContentRow(view, rowIndex);
   DEBUG_PRINT("MSG_PLAY: start index=%ld (queue=%zu)\n",

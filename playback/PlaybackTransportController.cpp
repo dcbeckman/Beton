@@ -10,6 +10,7 @@
 #include "MediaItem.h"
 #include "AudioPlaybackEngine.h"
 #include "Messages.h"
+#include "PlaybackQueueManager.h"
 #include "RadioStationController.h"
 #include "PlaybackSeekBarView.h"
 #include "ViewStateController.h"
@@ -353,6 +354,13 @@ PlaybackTransportController::_UpdateNowPlayingState(const BString &path,
   auto npIt = fWindow->fPathIndex.find(path);
   if (npIt != fWindow->fPathIndex.end()) {
     fNowPlayingItem = fWindow->fAllItems[npIt->second];
+    fNowPlayingIsValid = true;
+    artist = fNowPlayingItem.artist;
+    title = fNowPlayingItem.title;
+  } else if (const MediaItem *queued = fWindow->fPlaybackQueueManager
+                 ? fWindow->fPlaybackQueueManager->QueueItemForPath(path)
+                 : nullptr) {
+    fNowPlayingItem = *queued;
     fNowPlayingIsValid = true;
     artist = fNowPlayingItem.artist;
     title = fNowPlayingItem.title;
