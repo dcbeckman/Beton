@@ -2079,6 +2079,18 @@ const MediaItem *MediaTableView::ItemAt(int32 index) const {
 }
 
 /**
+ * @brief Returns true if a row for @a path is in the view.
+ */
+bool MediaTableView::HasPath(const BString &path) const {
+  for (int32 i = 0; i < CountRows(); ++i) {
+    const MediaItem *mi = ItemAt(i);
+    if (mi && mi->path == path)
+      return true;
+  }
+  return false;
+}
+
+/**
  * @brief Builds a playback queue from the current sorted view.
  *
  * Iterates all rows in display order and collects file paths

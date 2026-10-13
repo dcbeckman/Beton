@@ -209,6 +209,54 @@ void LibraryController::HandleFileMove(BMessage *msg) {
   fWindow->UpdateStatus(status);
 }
 
+void LibraryController::HandleFileMoved(BMessage *msg) {
+  BString from, to;
+  if (msg->FindString("from", &from) != B_OK ||
+      msg->FindString("to", &to) != B_OK)
+    return;
+
+  DEBUG_PRINT("file moved: %s -> %s\n", from.String(), to.String());
+
+  // Beton's own moves were already applied by HandleFileMove, so for those
+  // nothing below matches |from| any more and this is a no-op.
+  auto mapIt = fWindow->fPathIndex.find(from);
+  if (mapIt != fWindow->fPathIndex.end()) {
+    size_t idx = mapIt->second;
+    fWindow->fPathIndex.erase(mapIt);
+    fWindow->fAllItems[idx].path = to;
+    fWindow->fPathIndex[to] = idx;
+  }
+
+  MediaTableView *cv =
+      (fWindow->fLibraryManager) ? fWindow->fLibraryManager->ContentView()
+                                 : nullptr;
+  if (!cv)
+    return;
+
+  for (int32 i = 0; i < cv->CountRows(); ++i) {
+    const MediaItem *mi = cv->ItemAt(i);
+    if (!mi || mi->path != from)
+      continue;
+    // Moved out of the folder on show (e.g. Tracker's Move to Trash): the row
+    // goes. Anywhere else it just follows the file.
+    if (fWindow->fIsFolderMode &&
+        !fWindow->fLibraryManager->IsPathAllowed(to, false)) {
+      BRow *r = cv->RowAt(i);
+      cv->RemoveRow(r);
+      delete r;
+    } else {
+      MediaItem updated = *mi;
+      updated.path = to;
+      cv->UpdateItem(updated, &from);
+    }
+    break;
+  }
+
+  if (cv->NowPlayingPath() == from)
+    cv->SetNowPlayingPath(to);
+  fWindow->fLibraryManager->RenameActivePath(from, to);
+}
+
 /**
  * @brief Replaces current item cache with persisted entries and refreshes UI.
  */
@@ -848,9 +896,16 @@ void LibraryController::HandleMediaItemFound(BMessage *msg) {
       if (isLibraryItem) {
         fWindow->fLibraryManager->ContentView()->UpdateItem(*itemToUpdate);
       } else {
+        // In Folder mode an Undo may already have put the row back (from saved
+        // data) before the cache's rescan of the returned file reports it.
+        // Not checked in Library mode: a scan adds rows one by one here, and a
+        // per-row search of a large library would make that quadratic.
+        MediaTableView *cv = fWindow->fLibraryManager->ContentView();
         if (fWindow->fIsLibraryMode ||
-            (fWindow->fIsFolderMode && fWindow->fLibraryManager->IsPathAllowed(path, false))) {
-          fWindow->fLibraryManager->ContentView()->AddEntry(*itemToUpdate);
+            (fWindow->fIsFolderMode &&
+             fWindow->fLibraryManager->IsPathAllowed(path, false) &&
+             !cv->HasPath(path))) {
+          cv->AddEntry(*itemToUpdate);
         }
       }
     }

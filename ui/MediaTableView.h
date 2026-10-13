@@ -60,6 +60,7 @@ public:
 
   const MediaItem *SelectedItem() const;
   const MediaItem *ItemAt(int32 index) const;
+  bool HasPath(const BString &path) const;
   bool IsRowMissing(BRow *row) const;
 
   /**

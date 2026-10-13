@@ -45,6 +45,12 @@ public:
   void HandleFileMove(BMessage* msg);
 
   /**
+   * @brief Follows a file another app moved out of the watched folder.
+   * @param msg MSG_FILE_MOVED from the cache, with "from" and "to" paths.
+   */
+  void HandleFileMoved(BMessage* msg);
+
+  /**
    * @brief Handles initial cache-load completion and refreshes views.
    */
   void HandleCacheLoaded();
