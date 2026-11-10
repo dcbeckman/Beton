@@ -97,8 +97,9 @@ bool PlaybackMessageHandler::HandleMessage(BMessage *msg) {
   }
 
   case MSG_REPLAYGAIN_MODE: {
-    int32 mode = AudioPlaybackEngine::kReplayGainAuto;
-    msg->FindInt32("mode", &mode);
+    int32 mode;
+    if (msg->FindInt32("mode", &mode) != B_OK)
+      mode = AudioPlaybackEngine::kReplayGainAuto;
     fWindow->SetReplayGainMode(mode);
     fWindow->SaveSettings();
     return true;

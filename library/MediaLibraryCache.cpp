@@ -1138,19 +1138,33 @@ void MediaLibraryCache::MessageReceived(BMessage *msg) {
     if (msg->FindString("composer", &tmpStr) == B_OK)
       e.composer = tmpStr;
 
-    msg->FindInt32("year", &e.year);
-    msg->FindInt32("track", &e.track);
-    msg->FindInt32("trackTotal", &e.trackTotal);
-    msg->FindInt32("disc", &e.disc);
-    msg->FindInt32("discTotal", &e.discTotal);
-    msg->FindInt32("duration", &e.duration);
-    msg->FindInt32("bitrate", &e.bitrate);
-    msg->FindInt32("sampleRate", &e.sampleRate);
-    msg->FindInt32("channels", &e.channels);
-    msg->FindInt32("rating", &e.rating);
-    msg->FindInt64("size", &e.size);
-    msg->FindInt64("mtime", &e.mtime);
-    msg->FindInt64("inode", &e.inode);
+    // Updates carry only the fields they change (an Analyze result has just
+    // the gain; MusicBrainz has no size/mtime/inode), so apply only what is
+    // there. Haiku's BMessage::Find*() zeroes its output before looking, so
+    // reading straight into the entry wiped every field the sender left out.
+    auto readInt32 = [msg](const char *name, int32 &field) {
+      int32 value;
+      if (msg->FindInt32(name, &value) == B_OK)
+        field = value;
+    };
+    auto readInt64 = [msg](const char *name, int64 &field) {
+      int64 value;
+      if (msg->FindInt64(name, &value) == B_OK)
+        field = value;
+    };
+    readInt32("year", e.year);
+    readInt32("track", e.track);
+    readInt32("trackTotal", e.trackTotal);
+    readInt32("disc", e.disc);
+    readInt32("discTotal", e.discTotal);
+    readInt32("duration", e.duration);
+    readInt32("bitrate", e.bitrate);
+    readInt32("sampleRate", e.sampleRate);
+    readInt32("channels", e.channels);
+    readInt32("rating", e.rating);
+    readInt64("size", e.size);
+    readInt64("mtime", e.mtime);
+    readInt64("inode", e.inode);
     e.ReadGainFields(*msg);
 
     if (msg->FindString("mbAlbumId", &tmpStr) == B_OK ||
