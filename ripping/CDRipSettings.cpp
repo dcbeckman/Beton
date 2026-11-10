@@ -45,6 +45,8 @@ void CDRipSettings::Load() {
   format = RipFormat::FLAC;
   directory.Truncate(0);
   pattern.Truncate(0);
+  verify = true;
+  fDriveOffsets.MakeEmpty();
 
   BPath path;
   if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
@@ -58,6 +60,10 @@ void CDRipSettings::Load() {
         format = (RipFormat)value;
       archive.FindString("directory", &directory);
       archive.FindString("pattern", &pattern);
+      bool b;
+      if (archive.FindBool("verify", &b) == B_OK)
+        verify = b;
+      archive.FindMessage("drive_offsets", &fDriveOffsets);
     }
   }
 
@@ -77,8 +83,27 @@ void CDRipSettings::Save() const {
   archive.AddInt32("format", (int32)format);
   archive.AddString("directory", directory);
   archive.AddString("pattern", pattern);
+  archive.AddBool("verify", verify);
+  archive.AddMessage("drive_offsets", &fDriveOffsets);
 
   BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
   if (file.InitCheck() == B_OK)
     archive.Flatten(&file);
+}
+
+bool CDRipSettings::DriveOffset(const BString &drive, int32 &offset) const {
+  return !drive.IsEmpty() &&
+         fDriveOffsets.FindInt32(drive.String(), &offset) == B_OK;
+}
+
+void CDRipSettings::SetDriveOffset(const BString &drive, int32 offset) {
+  if (drive.IsEmpty())
+    return;
+  fDriveOffsets.RemoveName(drive.String());
+  fDriveOffsets.AddInt32(drive.String(), offset);
+}
+
+void CDRipSettings::ForgetDriveOffset(const BString &drive) {
+  if (!drive.IsEmpty())
+    fDriveOffsets.RemoveName(drive.String());
 }

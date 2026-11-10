@@ -231,6 +231,8 @@
 #define MSG_CD_RIP_TRACK_DONE 'cdrT' ///< Ripper -> window: "track", "status", "path", "error".
 #define MSG_CD_RIP_FINISHED 'cdrF'   ///< Ripper -> window: counts, "cancelled", "path" per file.
 #define MSG_CD_RIP_IMPORT 'cdrI'     ///< Rip window -> MainWindow: add ripped "path"s to the library.
+#define MSG_CD_RIP_STATUS 'cdrS'     ///< Ripper -> window: "text" for a step before ripping.
+#define MSG_CD_RIP_OFFSET 'cdrO'     ///< Ripper -> window: detected drive "offset", "confidence".
 ///@}
 
 #endif // BETON_MESSAGES_H

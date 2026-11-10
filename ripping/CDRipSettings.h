@@ -1,6 +1,7 @@
 #ifndef BETON_CD_RIP_SETTINGS_H
 #define BETON_CD_RIP_SETTINGS_H
 
+#include <Message.h>
 #include <String.h>
 #include <SupportDefs.h>
 
@@ -23,6 +24,16 @@ struct CDRipSettings {
   RipFormat format = RipFormat::FLAC;
   BString directory; ///< Absolute folder the pattern is resolved against.
   BString pattern;   ///< Folder/file name pattern, see RipNamePattern.
+  bool verify = true; ///< Check rips against the AccurateRip database.
+
+  /**
+   * @brief The remembered read offset of a drive.
+   * @param drive Drive name from AccurateRip::DriveName().
+   * @return False if the offset of this drive isn't known yet.
+   */
+  bool DriveOffset(const BString &drive, int32 &offset) const;
+  void SetDriveOffset(const BString &drive, int32 offset);
+  void ForgetDriveOffset(const BString &drive);
 
   /** Loads saved settings, filling anything missing with defaults. */
   void Load();
@@ -33,6 +44,9 @@ struct CDRipSettings {
   static const char *DefaultPattern();
   /** First library folder, or ~/music when no library folder is set up. */
   static BString DefaultDirectory();
+
+private:
+  BMessage fDriveOffsets; ///< Drive name -> int32 read offset in samples.
 };
 
 #endif // BETON_CD_RIP_SETTINGS_H

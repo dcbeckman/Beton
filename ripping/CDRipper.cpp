@@ -7,33 +7,32 @@
 #include "RipNamePattern.h"
 
 #include <ByteOrder.h>
+#include <Catalog.h>
 #include <Directory.h>
 #include <Entry.h>
-#include <File.h>
+#include <InterfaceDefs.h>
 #include <Mime.h>
 #include <Path.h>
 
 #include <algorithm>
 #include <errno.h>
-#include <memory>
 #include <set>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
+#undef B_TRANSLATION_CONTEXT
+#define B_TRANSLATION_CONTEXT "CDRipper"
+
 namespace {
 
-/** Bytes read per call: 32 CD sectors, about 0.4 s of audio. */
-const size_t kReadChunk = 32 * 2352;
+/** Frames read per call: 32 CD sectors, about 0.4 s of audio. */
+const size_t kChunkFrames = 32 * 588;
 
 const bigtime_t kProgressInterval = 200000;
 
-struct WavLayout {
-  off_t dataOffset = 0;
-  off_t dataSize = 0;
-  int32 sampleRate = 0;
-  int32 channels = 0;
-};
+/** Offsets tried when detecting the drive's read offset. */
+const int32 kOffsetRange = AccurateRip::kSkipFrames - 1;
 
 uint32 ReadLE32(const uint8 *p) {
   return (uint32)p[0] | ((uint32)p[1] << 8) | ((uint32)p[2] << 16) |
@@ -44,10 +43,12 @@ uint16 ReadLE16(const uint8 *p) { return (uint16)(p[0] | (p[1] << 8)); }
 
 /**
  * Finds the PCM data in a cdda track. The cdda file system always writes the
- * plain 44-byte header, but walking the chunks costs nothing and copes with
- * any other WAV the job might be handed.
+ * plain 44-byte header, but walking the chunks costs nothing. Only CD audio
+ * (44.1 kHz, 16-bit stereo) is accepted: the disc is read as one continuous
+ * stream of 4-byte frames across the track files.
  */
-status_t ParseWav(BFile &file, off_t fileSize, WavLayout &out, BString &error) {
+status_t ParseWav(BFile &file, off_t fileSize, off_t &dataOffset,
+                  off_t &dataSize, BString &error) {
   uint8 riff[12];
   if (file.ReadAt(0, riff, sizeof(riff)) != (ssize_t)sizeof(riff) ||
       memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0) {
@@ -68,21 +69,17 @@ status_t ParseWav(BFile &file, off_t fileSize, WavLayout &out, BString &error) {
       uint8 fmt[16];
       if (file.ReadAt(body, fmt, sizeof(fmt)) != (ssize_t)sizeof(fmt))
         break;
-      const uint16 tag = ReadLE16(fmt);
-      out.channels = ReadLE16(fmt + 2);
-      out.sampleRate = (int32)ReadLE32(fmt + 4);
-      const uint16 bits = ReadLE16(fmt + 14);
-      if (tag != 1 || bits != 16 || out.channels < 1 || out.channels > 2 ||
-          out.sampleRate <= 0) {
-        error = "Unsupported audio layout on the disc";
+      if (ReadLE16(fmt) != 1 || ReadLE16(fmt + 2) != 2 ||
+          ReadLE32(fmt + 4) != 44100 || ReadLE16(fmt + 14) != 16) {
+        error = "Not CD audio (44.1 kHz, 16-bit stereo)";
         return B_NOT_SUPPORTED;
       }
       haveFormat = true;
     } else if (memcmp(chunk, "data", 4) == 0) {
       if (!haveFormat)
         break;
-      out.dataOffset = body;
-      out.dataSize = std::min<off_t>((off_t)size, fileSize - body);
+      dataOffset = body;
+      dataSize = std::min<off_t>((off_t)size, fileSize - body);
       return B_OK;
     }
     pos = body + size + (size & 1);
@@ -124,10 +121,7 @@ TagData ToTagData(const MediaItem &t) {
 } // namespace
 
 CDRipper::CDRipper(const CDRipJob &job, BMessenger target)
-    : fJob(job), fTarget(target) {
-  for (const MediaItem &t : fJob.tracks)
-    fTotalBytes += t.size;
-}
+    : fJob(job), fTarget(target) {}
 
 CDRipper::~CDRipper() {
   Cancel();
@@ -171,29 +165,180 @@ status_t CDRipper::_ThreadEntry(void *data) {
   return B_OK;
 }
 
-void CDRipper::_SendProgress(size_t index, off_t trackBytesDone, bool force) {
+void CDRipper::_SendStatus(const char *text) {
+  BMessage msg(MSG_CD_RIP_STATUS);
+  msg.AddString("text", text);
+  fTarget.SendMessage(&msg);
+}
+
+void CDRipper::_SendProgress(size_t index, int64 framesDone, bool force) {
   const bigtime_t now = system_time();
   if (!force && now - fLastProgress < kProgressInterval)
     return;
   fLastProgress = now;
 
+  const int64 trackFrames = fSpans[index].frames;
   float fraction = 0.0f;
-  if (fTotalBytes > 0)
-    fraction = (float)(fBytesBefore + trackBytesDone) / (float)fTotalBytes;
+  if (fDiscFrames > 0)
+    fraction = (float)(fFramesBefore + framesDone) / (float)fDiscFrames;
 
   BMessage msg(MSG_CD_RIP_PROGRESS);
   msg.AddInt32("track", (int32)index);
   msg.AddInt32("tracks", (int32)fJob.tracks.size());
   msg.AddFloat("fraction", std::min(fraction, 1.0f));
+  msg.AddFloat("track_fraction",
+               trackFrames > 0 ? (float)framesDone / (float)trackFrames : 0.0f);
   msg.AddString("title", fJob.tracks[index].title);
   // Progress is best effort: never stall the rip on a busy window.
   fTarget.SendMessage(&msg, (BHandler *)nullptr, 0);
 }
 
+status_t CDRipper::_BuildLayout(BString &error) {
+  // cdda's track files are contiguous: each runs from its track's start to
+  // the next one's, so the disc is simply the files one after another.
+  fSpans.clear();
+  fDiscFrames = 0;
+  for (const MediaItem &track : fJob.tracks) {
+    Span span;
+    span.file.reset(new BFile(track.path.String(), B_READ_ONLY));
+    off_t size = 0;
+    if (span.file->InitCheck() != B_OK || span.file->GetSize(&size) != B_OK) {
+      error.SetToFormat("Could not open track %ld on the disc", (long)track.track);
+      return B_ERROR;
+    }
+    off_t dataSize = 0;
+    status_t status = ParseWav(*span.file, size, span.dataOffset, dataSize, error);
+    if (status != B_OK)
+      return status;
+    span.firstFrame = fDiscFrames;
+    span.frames = dataSize / 4;
+    fDiscFrames += span.frames;
+    fSpans.push_back(std::move(span));
+  }
+  return fSpans.empty() ? B_ENTRY_NOT_FOUND : B_OK;
+}
+
+status_t CDRipper::_ReadDisc(int64 first, size_t count, uint32 *out,
+                             BString &error) {
+  size_t done = 0;
+  size_t span = 0;
+  while (done < count) {
+    const int64 frame = first + (int64)done;
+    if (frame < 0 || frame >= fDiscFrames) {
+      // Before the first track or past the lead-out: cdda can't read there.
+      // Silence is what other rippers use too, and AccurateRip leaves these
+      // frames out of its checksums.
+      out[done++] = 0;
+      continue;
+    }
+    while (span + 1 < fSpans.size() && fSpans[span + 1].firstFrame <= frame)
+      span++;
+    while (span > 0 && fSpans[span].firstFrame > frame)
+      span--;
+
+    const Span &s = fSpans[span];
+    const size_t n = (size_t)std::min<int64>((int64)(count - done),
+                                             s.firstFrame + s.frames - frame);
+    const off_t at = s.dataOffset + (frame - s.firstFrame) * 4;
+    ssize_t got = s.file->ReadAt(at, out + done, n * 4);
+    if (got != (ssize_t)(n * 4)) {
+      const status_t status = got < 0 ? (status_t)got : B_IO_ERROR;
+      error.SetToFormat("Read error at %ld:%02ld on the disc: %s",
+                        (long)(frame / 44100 / 60), (long)(frame / 44100 % 60),
+                        got < 0 ? strerror(status) : "unexpected end");
+      return status;
+    }
+    done += n;
+  }
+  return B_OK;
+}
+
+void CDRipper::_LookUp() {
+  if (!fJob.verify)
+    return;
+
+  _SendStatus(B_TRANSLATE("Looking up the disc in AccurateRip" B_UTF8_ELLIPSIS));
+
+  AccurateRip::DiscId id;
+  if (AccurateRip::ReadDiscId(fJob.discPath, id) != B_OK) {
+    fLookupNote = B_TRANSLATE("not checked: the disc's table of contents "
+                              "could not be read");
+    return;
+  }
+  if (id.audioTracks != (int32)fJob.tracks.size()) {
+    fLookupNote = B_TRANSLATE("not checked: the track list doesn't match the "
+                              "disc's table of contents");
+    return;
+  }
+
+  BString error;
+  status_t status = AccurateRip::Fetch(id, fDatabase, error);
+  if (status == B_OK) {
+    fLookup = kRipAccurate;
+  } else if (status == B_ENTRY_NOT_FOUND) {
+    fLookup = kRipNotInDatabase;
+    fLookupNote = B_TRANSLATE("this disc is not in the database");
+  } else {
+    fLookupNote.SetToFormat(B_TRANSLATE("not checked: %s"), error.String());
+  }
+}
+
+void CDRipper::_DetectOffset() {
+  if (fJob.offsetKnown || fLookup != kRipAccurate || fSpans.size() < 3)
+    return;
+
+  _SendStatus(B_TRANSLATE("Finding the drive's read offset" B_UTF8_ELLIPSIS));
+
+  // Use the shortest track that is neither first nor last (those have
+  // frames left out of their checksums): least to read again.
+  size_t best = 1;
+  for (size_t i = 2; i + 1 < fSpans.size(); i++) {
+    if (fSpans[i].frames < fSpans[best].frames)
+      best = i;
+  }
+
+  const Span &s = fSpans[best];
+  std::vector<uint32> frames((size_t)s.frames + 2 * kOffsetRange);
+  BString error;
+  if (_ReadDisc(s.firstFrame - kOffsetRange, frames.size(), frames.data(),
+                error) != B_OK) {
+    DEBUG_PRINT("CD rip: offset detection read failed: %s\n", error.String());
+    return;
+  }
+
+  int32 offset = 0, confidence = 0;
+  if (!AccurateRip::FindOffset(frames.data(), (uint32)s.frames, kOffsetRange,
+                               best, fDatabase, offset, confidence)) {
+    DEBUG_PRINT("CD rip: no read offset matched track %zu\n", best + 1);
+    return;
+  }
+
+  DEBUG_PRINT("CD rip: drive read offset %+ld (track %zu, confidence %ld)\n",
+              (long)offset, best + 1, (long)confidence);
+  fJob.offset = offset;
+  fJob.offsetKnown = true;
+  fOffsetDetected = true;
+
+  BMessage msg(MSG_CD_RIP_OFFSET);
+  msg.AddInt32("offset", offset);
+  msg.AddInt32("confidence", confidence);
+  fTarget.SendMessage(&msg);
+}
+
 void CDRipper::_Run() {
-  int32 ripped = 0, skipped = 0, failed = 0;
+  int32 ripped = 0, skipped = 0, failed = 0, accurate = 0, noMatch = 0;
   std::set<BString> written;
   BMessage finished(MSG_CD_RIP_FINISHED);
+
+  BString layoutError;
+  if (_BuildLayout(layoutError) != B_OK) {
+    finished.AddString("error", layoutError);
+    fJob.tracks.clear();
+  } else {
+    _LookUp();
+    if (!fCancel)
+      _DetectOffset();
+  }
 
   for (size_t i = 0; i < fJob.tracks.size() && !fCancel; i++) {
     const MediaItem &track = fJob.tracks[i];
@@ -208,20 +353,39 @@ void CDRipper::_Run() {
 
     BString error;
     status_t status;
+    RipVerdict verdict = kRipNotChecked;
+    int32 confidence = -1;
+    AccurateRip::Checksum checksum;
+
     if (BEntry(dest.String()).Exists()) {
       status = B_FILE_EXISTS;
       skipped++;
     } else {
-      status = _RipTrack(i, dest, error);
+      status = _RipTrack(i, dest, checksum, error);
       if (status == B_OK) {
         ripped++;
         written.insert(dest);
         finished.AddString("path", dest);
+
+        if (fLookup == kRipAccurate) {
+          confidence = std::max(fDatabase.Match(i, checksum.V2()),
+                                fDatabase.Match(i, checksum.V1()));
+          verdict = confidence >= 0 ? kRipAccurate : kRipNoMatch;
+          if (verdict == kRipAccurate)
+            accurate++;
+          else
+            noMatch++;
+        } else if (fLookup == kRipNotInDatabase) {
+          verdict = kRipNotInDatabase;
+        }
+        DEBUG_PRINT("CD rip: track %zu v1 %08" B_PRIx32 " v2 %08" B_PRIx32
+                    " -> %d (%ld)\n", i + 1, checksum.V1(), checksum.V2(),
+                    (int)verdict, (long)confidence);
       } else if (status != B_CANCELED) {
         failed++;
       }
     }
-    fBytesBefore += track.size;
+    fFramesBefore += fSpans[i].frames;
 
     if (status == B_CANCELED)
       break;
@@ -232,31 +396,29 @@ void CDRipper::_Run() {
     done.AddString("path", dest);
     done.AddString("title", track.title);
     done.AddString("error", error);
+    done.AddInt32("ar", verdict);
+    done.AddInt32("ar_confidence", confidence);
     fTarget.SendMessage(&done);
   }
 
   finished.AddInt32("ripped", ripped);
   finished.AddInt32("skipped", skipped);
   finished.AddInt32("failed", failed);
+  finished.AddInt32("accurate", accurate);
+  finished.AddInt32("no_match", noMatch);
+  finished.AddString("ar_note", fLookupNote);
+  finished.AddBool("offset_known", fJob.offsetKnown);
+  finished.AddBool("offset_detected", fOffsetDetected);
+  finished.AddInt32("offset", fJob.offset);
   finished.AddBool("cancelled", fCancel.load());
   fRunning = false;
   fTarget.SendMessage(&finished);
 }
 
-status_t CDRipper::_RipTrack(size_t index, const BString &dest, BString &error) {
+status_t CDRipper::_RipTrack(size_t index, const BString &dest,
+                             AccurateRip::Checksum &checksum, BString &error) {
   const MediaItem &track = fJob.tracks[index];
-
-  BFile in(track.path.String(), B_READ_ONLY);
-  off_t fileSize = 0;
-  if (in.InitCheck() != B_OK || in.GetSize(&fileSize) != B_OK) {
-    error = "Could not open the track on the disc";
-    return B_ERROR;
-  }
-
-  WavLayout wav;
-  status_t status = ParseWav(in, fileSize, wav, error);
-  if (status != B_OK)
-    return status;
+  const Span &span = fSpans[index];
 
   BPath destPath(dest.String());
   BPath parent;
@@ -264,7 +426,7 @@ status_t CDRipper::_RipTrack(size_t index, const BString &dest, BString &error) 
     error = "Invalid destination path";
     return B_BAD_VALUE;
   }
-  status = create_directory(parent.Path(), 0755);
+  status_t status = create_directory(parent.Path(), 0755);
   if (status != B_OK) {
     error.SetToFormat("Could not create folder %s: %s", parent.Path(),
                       strerror(status));
@@ -275,57 +437,50 @@ status_t CDRipper::_RipTrack(size_t index, const BString &dest, BString &error) 
   partPath << ".part";
 
   std::unique_ptr<AudioFileEncoder> encoder(CreateAudioFileEncoder(fJob.format));
-  status = encoder->Open(partPath.String(), wav.sampleRate, wav.channels, track);
+  status = encoder->Open(partPath.String(), 44100, 2, track);
   if (status != B_OK) {
     error = encoder->ErrorText();
     unlink(partPath.String());
     return status;
   }
 
-  const size_t frameBytes = (size_t)wav.channels * sizeof(int16);
-  const size_t chunk = kReadChunk - (kReadChunk % frameBytes);
-  std::unique_ptr<uint8[]> buffer(new uint8[chunk]);
-  size_t carry = 0; // Bytes of a partial frame left from the previous read.
+  checksum.Begin((uint32)span.frames, index == 0,
+                 index + 1 == fSpans.size());
 
-  off_t done = 0;
-  while (done < wav.dataSize) {
+  // The track as other rippers see it: shifted by the drive's read offset,
+  // which may reach a little into the neighbouring tracks.
+  const int64 first = span.firstFrame + fJob.offset;
+  std::vector<uint32> buffer(kChunkFrames);
+
+  int64 done = 0;
+  while (done < span.frames) {
     if (fCancel) {
       encoder->Abort();
       unlink(partPath.String());
       return B_CANCELED;
     }
 
-    size_t want = (size_t)std::min<off_t>((off_t)(chunk - carry), wav.dataSize - done);
-    ssize_t got = in.ReadAt(wav.dataOffset + done, buffer.get() + carry, want);
-    if (got <= 0) {
-      error.SetToFormat("Read error at %.0f%% of the track: %s",
-                        100.0 * (double)done / (double)wav.dataSize,
-                        got < 0 ? strerror((status_t)got) : "unexpected end");
+    const size_t n = (size_t)std::min<int64>(kChunkFrames, span.frames - done);
+    status = _ReadDisc(first + done, n, buffer.data(), error);
+    if (status != B_OK) {
       encoder->Abort();
       unlink(partPath.String());
-      return got < 0 ? (status_t)got : B_IO_ERROR;
+      return status;
     }
-    done += got;
+    checksum.Add(buffer.data(), n);
 
-    size_t avail = carry + (size_t)got;
-    size_t frames = avail / frameBytes;
 #if B_HOST_IS_BENDIAN
-    swap_data(B_INT16_TYPE, buffer.get(), frames * frameBytes, B_SWAP_LENDIAN_TO_HOST);
+    swap_data(B_INT16_TYPE, buffer.data(), n * 4, B_SWAP_LENDIAN_TO_HOST);
 #endif
-    if (frames > 0) {
-      status = encoder->Write(reinterpret_cast<const int16 *>(buffer.get()),
-                              (int32)frames);
-      if (status != B_OK) {
-        error = encoder->ErrorText();
-        encoder->Abort();
-        unlink(partPath.String());
-        return status;
-      }
+    status = encoder->Write(reinterpret_cast<const int16 *>(buffer.data()),
+                            (int32)n);
+    if (status != B_OK) {
+      error = encoder->ErrorText();
+      encoder->Abort();
+      unlink(partPath.String());
+      return status;
     }
-    carry = avail - frames * frameBytes;
-    if (carry > 0)
-      memmove(buffer.get(), buffer.get() + frames * frameBytes, carry);
-
+    done += n;
     _SendProgress(index, done, false);
   }
 
