@@ -343,7 +343,11 @@ bool MetadataTagIO::ReadTags(const BPath &path, TagData &out,
     }
   }
 
-  {
+  // Only open the file as the format its extension names. TagLib's MPEG
+  // reader looks for a frame header through the whole file, and in a FLAC it
+  // even finds a false one: 0.8 s per 20 MB FLAC on HaikuBox (hrev60368),
+  // which made scanning a folder of ripped FLACs crawl.
+  if (lower.EndsWith(".mp3")) {
     TagLib::MPEG::File mf(path.Path());
     if (mf.isOpen()) {
       if (TagLib::ID3v2::Tag *id3 = mf.ID3v2Tag()) {
@@ -403,7 +407,8 @@ bool MetadataTagIO::ReadTags(const BPath &path, TagData &out,
     }
   }
 
-  {
+  if (lower.EndsWith(".m4a") || lower.EndsWith(".mp4") ||
+      lower.EndsWith(".aac")) {
     TagLib::MP4::File mf(path.Path());
     if (mf.isValid() && mf.tag()) {
       TagLib::MP4::Tag *tag = mf.tag();

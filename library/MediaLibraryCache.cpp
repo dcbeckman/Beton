@@ -1493,6 +1493,15 @@ void MediaLibraryCache::ScanPath(const BString &dirPath) {
   if (dir.InitCheck() != B_OK)
     return;
 
+  // Selecting a folder row asks for a scan each time. Repeated clicks used to
+  // stack up full scans of the same folder (seen: 15 scans of 17 files).
+  for (const auto &kv : fFolderScanPaths) {
+    if (kv.second == dirPath) {
+      DEBUG_PRINT("ScanPath: %s is already being scanned\n", dirPath.String());
+      return;
+    }
+  }
+
   // The scanner only reports files it finds, so anything deleted while this
   // folder was not being watched would survive as a stale row. Reconcile
   // before scanning so the view drops it.
@@ -1512,6 +1521,7 @@ void MediaLibraryCache::ScanPath(const BString &dirPath) {
   scanner->Run();
 
   fScanners[scanner->ScanId()] = scanner;
+  fFolderScanPaths[scanner->ScanId()] = dirPath;
 
   BMessenger msgr(scanner);
   msgr.SendMessage(MSG_START_SCAN);
@@ -1868,6 +1878,7 @@ void MediaLibraryCache::_DestroyScanner(int32 scanId) {
 
   MediaLibraryScanner *scanner = it->second;
   fScanners.erase(it);
+  fFolderScanPaths.erase(scanId);
 
   // In the normal case the worker has already returned by the time its
   // MSG_SCAN_DONE reaches us, so this costs nothing.
@@ -1907,6 +1918,7 @@ void MediaLibraryCache::_StopAllScanners() {
   }
 
   fScanners.clear();
+  fFolderScanPaths.clear();
   fActiveScanners = 0;
 }
 

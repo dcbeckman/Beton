@@ -377,6 +377,9 @@ private:
 
   /** @brief Live scanners, keyed by the id handed out at launch. */
   std::map<int32, MediaLibraryScanner *> fScanners;
+  /// Folder each ScanPath() scanner is working on, so selecting a folder
+  /// again while it is still being scanned doesn't start another full scan.
+  std::map<int32, BString> fFolderScanPaths;
 
   /** @brief Per-scanner counters, keyed by the id handed out at launch. */
   std::map<int32, ScanCounters> fScanCounters;
