@@ -1,5 +1,6 @@
 #include "PlaylistMessageHandler.h"
 
+#include "CDRipWindow.h"
 #include "MainWindow.h"
 #include "PlaylistEditController.h"
 #include "Messages.h"
@@ -14,6 +15,22 @@ bool PlaylistMessageHandler::HandleMessage(BMessage *msg) {
     return false;
 
   switch (msg->what) {
+  case MSG_CD_RIP: {
+    // One rip at a time: the drive can only read one disc quickly anyway.
+    if (fWindow->fCDRipWindow.IsValid()) {
+      fWindow->fCDRipWindow.SendMessage(msg);
+      break;
+    }
+    BString path, label;
+    if (msg->FindString("path", &path) != B_OK || path.IsEmpty())
+      break;
+    msg->FindString("label", &label);
+    CDRipWindow *ripWindow = new CDRipWindow(path, label, BMessenger(fWindow));
+    fWindow->fCDRipWindow = BMessenger(ripWindow);
+    ripWindow->Show();
+    break;
+  }
+
   case MSG_NEW_SMART_PLAYLIST: {
     fWindow->fPlaylistEditController->ShowSmartPlaylistGenerator();
     break;

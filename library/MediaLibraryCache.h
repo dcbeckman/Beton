@@ -93,6 +93,15 @@ public:
    */
   std::vector<MediaItem> AllEntries() const;
 
+  /**
+   * @brief Loads configured source directories into `outDirs`.
+   * @param outDirs Output vector with absolute directory paths.
+   *
+   * Static: it only reads the settings files, so other parts of the app (the
+   * CD ripper) can ask which folders make up the library.
+   */
+  static void LoadDirectories(std::vector<BString> &outDirs);
+
 private:
   /** @brief Outcome of reading the on-disk cache file. */
   enum CacheLoadResult {
@@ -188,11 +197,6 @@ private:
    */
   void AddOrUpdateEntry(const MediaItem &entry);
 
-  /**
-   * @brief Loads configured source directories into `outDirs`.
-   * @param outDirs Output vector with absolute directory paths.
-   */
-  void LoadDirectories(std::vector<BString> &outDirs);
 
   /**
    * @brief Marks all entries below a base path as currently unavailable.

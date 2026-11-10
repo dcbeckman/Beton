@@ -198,6 +198,7 @@ private:
   bool fIsDlnaMode = false;   ///< True = DLNA server browsing view
   bool fIsCDMode = false;     ///< True = Audio CD source view
   BString fCDPath;
+  BMessenger fCDRipWindow; ///< The open "Rip audio CD" window, if any.
   BVolumeRoster fVolumeRoster;
   BString fPlaylistPath;
   BString fCurrentPlaylistName;

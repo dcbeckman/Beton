@@ -51,6 +51,13 @@ public:
   void HandleFileMoved(BMessage* msg);
 
   /**
+   * @brief Adds files the CD ripper just wrote to the library.
+   * @param msg MSG_CD_RIP_IMPORT with one "path" per file. Only files inside
+   *        a library folder are added; the rest are left alone.
+   */
+  void ImportRippedFiles(BMessage* msg);
+
+  /**
    * @brief Handles initial cache-load completion and refreshes views.
    */
   void HandleCacheLoaded();

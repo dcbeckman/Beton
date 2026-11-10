@@ -48,6 +48,12 @@ SRCS = \
     radio/RadioStationController.cpp \
     radio/RadioStationLibrary.cpp \
     radio/RadioStationEditorDialog.cpp \
+    ripping/CddaTracks.cpp \
+    ripping/CDRipper.cpp \
+    ripping/CDRipSettings.cpp \
+    ripping/CDRipWindow.cpp \
+    ripping/FFmpegAudioEncoder.cpp \
+    ripping/RipNamePattern.cpp \
     settings/SettingsController.cpp \
     sync/SyncMessageHandler.cpp \
     sync/MetadataSyncConflictDialog.cpp \
@@ -80,6 +86,7 @@ LOCAL_INCLUDE_PATHS = \
     playback \
     playlist \
     radio \
+    ripping \
     settings \
     sync \
     ui

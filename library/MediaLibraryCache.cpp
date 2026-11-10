@@ -1949,7 +1949,8 @@ void MediaLibraryCache::_PrepareFileScanQueue() {
 
     // A track shared by two playlists is scanned once but counts as work for
     // both, so the playlist figure reflects what the user would expect.
-    if (i < fPendingFileScanPlaylists.size())
+    // Negative: queued by something other than a playlist (the CD ripper).
+    if (i < fPendingFileScanPlaylists.size() && fPendingFileScanPlaylists[i] >= 0)
       playlistsWithWork.insert(fPendingFileScanPlaylists[i]);
 
     if (seen.insert(path).second)

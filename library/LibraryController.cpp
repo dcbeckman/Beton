@@ -70,6 +70,36 @@ static bool _IsTrashDirectory(const BDirectory &dir) {
 /**
  * @brief Moves a file on disk and updates library state on success.
  */
+void LibraryController::ImportRippedFiles(BMessage *msg) {
+  if (!fWindow->fMediaLibraryCache)
+    return;
+
+  std::vector<BString> dirs;
+  MediaLibraryCache::LoadDirectories(dirs);
+
+  BMessage scan(MSG_SCAN_FILES);
+  int32 queued = 0;
+  BString path;
+  for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
+    for (const BString &dir : dirs) {
+      BString prefix(dir);
+      if (!prefix.EndsWith("/"))
+        prefix << "/";
+      if (path.StartsWith(prefix)) {
+        scan.AddString("path", path);
+        scan.AddInt32("playlist", -1); // Not from a playlist.
+        queued++;
+        break;
+      }
+    }
+  }
+
+  DEBUG_PRINT("CD rip: %ld of the ripped files are in the library\n",
+              (long)queued);
+  if (queued > 0)
+    BMessenger(fWindow->fMediaLibraryCache).SendMessage(&scan);
+}
+
 void LibraryController::HandleFileMove(BMessage *msg) {
   BString from, to;
   if (msg->FindString("from", &from) != B_OK ||

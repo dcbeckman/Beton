@@ -224,4 +224,13 @@
 #define MSG_FALLBACK_DEVICE_CHANGED 'fbdc' ///< Fallback device for conflict changed.
 ///@}
 
+/** @name Audio CD Ripping */
+///@{
+#define MSG_CD_RIP 'cdrp'            ///< Open the rip window ("path", "label" of the disc).
+#define MSG_CD_RIP_PROGRESS 'cdrP'   ///< Ripper -> window: "track", "tracks", "fraction", "title".
+#define MSG_CD_RIP_TRACK_DONE 'cdrT' ///< Ripper -> window: "track", "status", "path", "error".
+#define MSG_CD_RIP_FINISHED 'cdrF'   ///< Ripper -> window: counts, "cancelled", "path" per file.
+#define MSG_CD_RIP_IMPORT 'cdrI'     ///< Rip window -> MainWindow: add ripped "path"s to the library.
+///@}
+
 #endif // BETON_MESSAGES_H

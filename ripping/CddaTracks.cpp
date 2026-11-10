@@ -1,0 +1,178 @@
+#include "CddaTracks.h"
+
+#include <Directory.h>
+#include <Entry.h>
+#include <Node.h>
+#include <Path.h>
+#include <Volume.h>
+#include <fs_info.h>
+
+#include <algorithm>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/**
+ * The disc-level artist. cdda puts per-track artists on the files but names
+ * the volume "<disc artist> - <album>", which is the only place a
+ * compilation's "Various Artists" survives.
+ */
+static BString DiscArtist(const BString &cdPath, const BString &album) {
+  BNode root(cdPath.String());
+  char buf[256] = {0};
+  if (root.InitCheck() == B_OK &&
+      root.ReadAttr("Audio:Artist", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0) {
+    BString artist(buf);
+    artist.Trim();
+    if (!artist.IsEmpty())
+      return artist;
+  }
+
+  if (album.IsEmpty())
+    return BString();
+
+  BVolume volume(dev_for_path(cdPath.String()));
+  char name[B_FILE_NAME_LENGTH] = {0};
+  if (volume.InitCheck() != B_OK || volume.GetName(name) != B_OK)
+    return BString();
+
+  // cdda swaps '/' for '-' in the volume name; compare the album the same way.
+  BString suffix(" - ");
+  suffix << album;
+  suffix.ReplaceAll('/', '-');
+  BString volumeName(name);
+  if (volumeName.Length() <= suffix.Length() || !volumeName.EndsWith(suffix))
+    return BString();
+  volumeName.Truncate(volumeName.Length() - suffix.Length());
+  volumeName.Trim();
+  return volumeName;
+}
+
+std::vector<MediaItem> CddaTracks::Read(const BString &cdPath) {
+  std::vector<MediaItem> cdTracks;
+  if (!cdPath.IsEmpty()) {
+    BDirectory dir(cdPath.String());
+    if (dir.InitCheck() == B_OK) {
+      BEntry entry;
+      dir.Rewind();
+      int32 fallbackTrackNum = 1;
+      while (dir.GetNextEntry(&entry, true) == B_OK) {
+        if (!entry.IsFile())
+          continue;
+
+        BPath path;
+        if (entry.GetPath(&path) != B_OK)
+          continue;
+
+        BString pathStr(path.Path());
+        BString lower(pathStr);
+        lower.ToLower();
+        if (!lower.EndsWith(".wav") && !lower.EndsWith(".aiff") && lower.IFindFirst("track") < 0)
+          continue;
+
+        MediaItem item;
+        item.path = pathStr;
+        item.base = cdPath;
+
+        BNode node(pathStr.String());
+        if (node.InitCheck() == B_OK) {
+          char buf[512];
+
+          memset(buf, 0, sizeof(buf));
+          if (node.ReadAttr("Media:Title", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0)
+            item.title = buf;
+          else if (node.ReadAttr("Audio:Title", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0)
+            item.title = buf;
+          else
+            item.title = path.Leaf();
+
+          memset(buf, 0, sizeof(buf));
+          if (node.ReadAttr("Audio:Artist", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0)
+            item.artist = buf;
+          else if (node.ReadAttr("Media:Artist", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0)
+            item.artist = buf;
+
+          memset(buf, 0, sizeof(buf));
+          if (node.ReadAttr("Audio:Album", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0)
+            item.album = buf;
+
+          memset(buf, 0, sizeof(buf));
+          if (node.ReadAttr("Media:Genre", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0)
+            item.genre = buf;
+          else if (node.ReadAttr("Audio:Genre", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0)
+            item.genre = buf;
+
+          int32 intVal = 0;
+          if (node.ReadAttr("Audio:Track", B_INT32_TYPE, 0, &intVal, sizeof(intVal)) > 0) {
+            item.track = intVal;
+          } else {
+            memset(buf, 0, sizeof(buf));
+            if (node.ReadAttr("Audio:Track", B_STRING_TYPE, 0, buf, sizeof(buf) - 1) > 0) {
+              item.track = atoi(buf);
+            } else {
+              int t = 0;
+              if (sscanf(path.Leaf(), "%d", &t) == 1 || sscanf(path.Leaf(), "Track %d", &t) == 1) {
+                item.track = t;
+              } else {
+                item.track = fallbackTrackNum;
+              }
+            }
+          }
+
+          if (node.ReadAttr("Media:Year", B_INT32_TYPE, 0, &intVal, sizeof(intVal)) > 0) {
+            item.year = intVal;
+          }
+
+          int64 len64 = 0;
+          if (node.ReadAttr("Media:Length", B_INT64_TYPE, 0, &len64, sizeof(len64)) > 0) {
+            item.duration = (int32)(len64 / 1000000LL);
+          } else if (node.ReadAttr("Media:Length", B_INT32_TYPE, 0, &intVal, sizeof(intVal)) > 0) {
+            item.duration = (intVal > 100000) ? (intVal / 1000000) : intVal;
+          }
+
+          off_t fileSize = 0;
+          if (entry.GetSize(&fileSize) == B_OK) {
+            item.size = fileSize;
+            if (item.duration == 0 && fileSize > 44) {
+              item.duration = (int32)((fileSize - 44) / 176400);
+            }
+          }
+        } else {
+          item.title = path.Leaf();
+          item.track = fallbackTrackNum;
+        }
+
+        fallbackTrackNum++;
+        cdTracks.push_back(item);
+      }
+    }
+  }
+
+  std::sort(cdTracks.begin(), cdTracks.end(), [](const MediaItem &a, const MediaItem &b) {
+    if (a.track != b.track)
+      return a.track < b.track;
+    return a.path < b.path;
+  });
+
+  // Only tracks from one album get an album artist; anything else is left
+  // for the tags (or {albumartist}'s fallback) to sort out.
+  if (!cdTracks.empty()) {
+    const BString &album = cdTracks.front().album;
+    bool sameAlbum = true;
+    for (const MediaItem &t : cdTracks) {
+      if (t.album != album) {
+        sameAlbum = false;
+        break;
+      }
+    }
+    BString discArtist = sameAlbum ? DiscArtist(cdPath, album) : BString();
+    if (!discArtist.IsEmpty()) {
+      for (MediaItem &t : cdTracks) {
+        if (t.albumArtist.IsEmpty())
+          t.albumArtist = discArtist;
+      }
+    }
+  }
+
+  return cdTracks;
+}

@@ -105,6 +105,11 @@ bool LibraryMessageHandler::HandleMessage(BMessage *msg) {
     break;
   }
 
+  case MSG_CD_RIP_IMPORT: {
+    fWindow->fLibraryController->ImportRippedFiles(msg);
+    break;
+  }
+
   case MSG_FILE_MOVE: {
     fWindow->fLibraryController->HandleFileMove(msg);
     break;

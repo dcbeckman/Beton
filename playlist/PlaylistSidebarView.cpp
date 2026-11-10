@@ -264,6 +264,10 @@ void PlaylistSidebarView::MessageReceived(BMessage *msg) {
     RemoveSelectedPlaylist();
     break;
 
+  case MSG_CD_RIP:
+    fTarget.SendMessage(msg);
+    break;
+
   default:
     SingleColumnListView::MessageReceived(msg);
   }
@@ -321,6 +325,12 @@ void PlaylistSidebarView::MouseDown(BPoint where) {
                fRows[index].kind == PlaylistItemKind::Folder) {
       fContextMenu->AddItem(new BMenuItem(B_TRANSLATE("Remove"),
                                           new BMessage(MSG_DELETE_PLAYLIST)));
+    } else if (KindAt(index) == PlaylistItemKind::CD) {
+      BMessage *rip = new BMessage(MSG_CD_RIP);
+      rip->AddString("path", PathAt(index));
+      rip->AddString("label", ItemAt(index));
+      fContextMenu->AddItem(
+          new BMenuItem(B_TRANSLATE("Rip CD" B_UTF8_ELLIPSIS), rip));
     }
 
     if (fContextMenu->CountItems() > 0) {
