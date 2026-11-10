@@ -162,10 +162,24 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
 
   BMessenger target(fWindow);
   std::atomic<bool> *shuttingDown = &fWindow->fShuttingDown;
+  // Tells the window (and through it the library cache) what was written.
+  auto report = [target](const BString &path, const ReplayGainInfo &gain) {
+    BMessage result(MSG_LOUDNESS_PROGRESS);
+    result.AddString("path", path);
+    if (gain.HasTrack()) {
+      result.AddFloat("rgTrackGain", gain.trackGain);
+      result.AddFloat("rgTrackPeak", gain.trackPeak);
+    }
+    if (gain.HasAlbum()) {
+      result.AddFloat("rgAlbumGain", gain.albumGain);
+      result.AddFloat("rgAlbumPeak", gain.albumPeak);
+    }
+    target.SendMessage(&result);
+  };
   std::atomic<bool> *running = &fLoudnessRunning;
 
   fWindow->LaunchThread("loudness_analysis", [paths, target, shuttingDown,
-                                              running]() {
+                                              running, report]() {
     // Group by folder and album tag: album gain needs the whole album.
     std::map<BString, std::vector<size_t>> albums;
     std::vector<BString> albumNames(paths.size());
@@ -213,6 +227,7 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
         gain.trackGain = (float)meter->Gain();
         gain.trackPeak = (float)meter->Peak();
         if (MetadataTagIO::WriteReplayGain(BPath(path.String()), gain)) {
+          report(path, gain);
           done++;
           measured.push_back(path);
           blocks.insert(blocks.end(), meter->Blocks().begin(),
@@ -239,8 +254,10 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
       gain.albumGain = (float)LoudnessMeter::GainFor(
           LoudnessMeter::GatedLoudness(blocks));
       gain.albumPeak = (float)peak;
-      for (const BString &path : measured)
-        MetadataTagIO::WriteReplayGain(BPath(path.String()), gain);
+      for (const BString &path : measured) {
+        if (MetadataTagIO::WriteReplayGain(BPath(path.String()), gain))
+          report(path, gain);
+      }
       albumsTagged++;
     }
 
@@ -249,8 +266,12 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
       return;
     }
 
-    text.SetToFormat(B_TRANSLATE("Loudness analyzed: %zu tracks, %zu albums"),
-                     done, albumsTagged);
+    if (albumsTagged == 1)
+      text.SetToFormat(B_TRANSLATE("Loudness analyzed: %zu tracks, 1 album"),
+                       done);
+    else
+      text.SetToFormat(B_TRANSLATE("Loudness analyzed: %zu tracks, %zu albums"),
+                       done, albumsTagged);
     if (failed > 0) {
       BString part;
       part.SetToFormat(B_TRANSLATE(", %zu could not be read or tagged"), failed);
@@ -265,6 +286,22 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
     SendStatus(target, text);
     running->store(false);
   });
+}
+
+void LibraryController::HandleLoudnessResult(BMessage *msg) {
+  BString path;
+  if (msg->FindString("path", &path) != B_OK || !fWindow->fMediaLibraryCache)
+    return;
+  // Only files the library knows: the cache adds an entry for any path it is
+  // sent, and a file analyzed from elsewhere doesn't belong there.
+  if (fWindow->fPathIndex.find(path) == fWindow->fPathIndex.end())
+    return;
+
+  // The cache stores the values and passes the update back to the window,
+  // which refreshes the row through HandleMediaItemFound().
+  BMessage update(*msg);
+  update.what = MSG_MEDIA_ITEM_FOUND;
+  BMessenger(fWindow->fMediaLibraryCache).SendMessage(&update);
 }
 
 void LibraryController::HandleFileMove(BMessage *msg) {
@@ -956,6 +993,7 @@ void LibraryController::HandleMediaBatch(BMessage *msg) {
         itemToUpdate->disc = val;
       if (msg->FindInt32("duration", i, &val) == B_OK)
         itemToUpdate->duration = val;
+      itemToUpdate->ReadGainFields(*msg, i);
 
       MediaTableView *cv =
           fWindow->fLibraryManager ? fWindow->fLibraryManager->ContentView() : nullptr;
@@ -1086,6 +1124,7 @@ void LibraryController::HandleMediaItemFound(BMessage *msg) {
   }
   if (msg->FindInt32("bitrate", &val) == B_OK)
     itemToUpdate->bitrate = val;
+  itemToUpdate->ReadGainFields(*msg);
 
   if (fWindow->fLibraryManager) {
     fWindow->fLibraryManager->UpdateActiveItem(*itemToUpdate);

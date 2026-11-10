@@ -550,6 +550,33 @@ private:
 };
 
 /**
+ * @class GainField
+ * @brief Shows a track's ReplayGain and sorts by its value, not its text.
+ */
+class GainField : public StatusStringField {
+public:
+  GainField(float gain, bool missing, std::shared_ptr<BString> path,
+            SourceType source)
+      : StatusStringField(_Text(gain).String(), missing, path, source),
+        fGain(gain) {}
+  float Gain() const { return fGain; }
+
+private:
+  static BString _Text(float gain) {
+    BString text;
+    if (!std::isnan(gain))
+      text.SetToFormat("%+.2f dB", gain);
+    return text;
+  }
+  float fGain;
+};
+
+static BField *MakeGainField(const MediaItem &mi, bool missing,
+                             std::shared_ptr<BString> path, SourceType source) {
+  return new GainField(mi.rgTrackGain, missing, path, source);
+}
+
+/**
  * @class StatusIntegerField
  * @brief BIntegerField subclass that tracks whether the file is missing.
  */
@@ -653,6 +680,28 @@ private:
   BString fAttrName;
   MediaTableView *fOwner = nullptr;
   BString fTitle;
+};
+
+/**
+ * @class GainColumn
+ * @brief ReplayGain track gain; numeric sort, unmeasured tracks last.
+ */
+class GainColumn : public StatusStringColumn {
+public:
+  GainColumn(const char *title, float width, float minWidth, float maxWidth)
+      : StatusStringColumn(title, width, minWidth, maxWidth, B_TRUNCATE_END,
+                           nullptr, B_ALIGN_RIGHT) {}
+
+  int CompareFields(BField *field1, BField *field2) override {
+    GainField *a = dynamic_cast<GainField *>(field1);
+    GainField *b = dynamic_cast<GainField *>(field2);
+    if (a == nullptr || b == nullptr)
+      return StatusStringColumn::CompareFields(field1, field2);
+    const bool aNone = std::isnan(a->Gain()), bNone = std::isnan(b->Gain());
+    if (aNone || bNone)
+      return aNone == bNone ? 0 : (aNone ? 1 : -1);
+    return a->Gain() < b->Gain() ? -1 : (a->Gain() > b->Gain() ? 1 : 0);
+  }
 };
 
 /**
@@ -974,6 +1023,7 @@ MediaTableView::MediaTableView(const char *name)
                                    B_TRUNCATE_END),
             10);
   AddColumn(new RatingColumn(B_TRANSLATE("Rating"), 80, 60, 100), 11);
+  AddColumn(new GainColumn(B_TRANSLATE("Gain"), 75, 50, 110), 13);
   AddColumn(new StatusIntegerColumn(B_TRANSLATE("Sort"), 50, 20, 80,
                                     "", B_ALIGN_RIGHT),
             12);
@@ -1165,6 +1215,9 @@ void MediaTableView::AddEntry(const MediaItem &mi, int32 index) {
   row->SetField(new StatusIntegerField(fIsPlaylistMode ? CountRows() + 1 : 0,
                                        m, src, pathPtr),
                 12);
+  // After field 12: BRow::SetField inserts into a list and cannot skip an
+  // index, so a field set past the end is silently dropped.
+  row->SetField(MakeGainField(mi, m, pathPtr, src), 13);
 
   if (index >= 0 && index <= CountRows())
     AddRow(row, index);
@@ -1202,6 +1255,10 @@ void MediaTableView::ArchiveItem(const MediaItem &mi, BMessage *out) {
   out->AddInt64("mtime", mi.mtime);
   out->AddInt64("inode", mi.inode);
   out->AddBool("missing", mi.missing);
+  out->AddFloat("rgTrackGain", mi.rgTrackGain);
+  out->AddFloat("rgTrackPeak", mi.rgTrackPeak);
+  out->AddFloat("rgAlbumGain", mi.rgAlbumGain);
+  out->AddFloat("rgAlbumPeak", mi.rgAlbumPeak);
 }
 
 MediaItem MediaTableView::UnarchiveItem(const BMessage *in) {
@@ -1239,6 +1296,7 @@ MediaItem MediaTableView::UnarchiveItem(const BMessage *in) {
   if (in->FindInt64("mtime", &i64) == B_OK) mi.mtime = i64;
   if (in->FindInt64("inode", &i64) == B_OK) mi.inode = i64;
   if (in->FindBool("missing", &b) == B_OK) mi.missing = b;
+  mi.ReadGainFields(*in);
   return mi;
 }
 
@@ -1293,6 +1351,7 @@ void MediaTableView::UpdateItem(const MediaItem &mi, const BString *matchPath) {
       mr->SetField(new StatusIntegerField(fIsPlaylistMode ? i + 1 : 0, m, src,
                                           pathPtr),
                    12);
+      mr->SetField(MakeGainField(mi, m, pathPtr, src), 13);
 
       InvalidateRow(mr);
       break;
@@ -1406,6 +1465,7 @@ BRow *MediaTableView::_CreateRow(const MediaItem &mi, int32 playlistIndex) {
                                            : 0,
                                        m, src, pathPtr),
                 12);
+  row->SetField(MakeGainField(mi, m, pathPtr, src), 13);
 
   return row;
 }
@@ -2423,6 +2483,16 @@ void MediaTableView::_PreSortPendingItems() {
     case 11:
       result = compareInt(a.rating, b.rating);
       break;
+    case 13: {
+      // ReplayGain; unmeasured tracks last.
+      const bool aNone = !a.HasTrackGain(), bNone = !b.HasTrackGain();
+      if (aNone || bNone)
+        result = aNone == bNone ? 0 : (aNone ? 1 : -1);
+      else
+        result = a.rgTrackGain < b.rgTrackGain ? -1
+                 : (a.rgTrackGain > b.rgTrackGain ? 1 : 0);
+      break;
+    }
     default:
       return false;
     }

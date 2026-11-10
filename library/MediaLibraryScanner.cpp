@@ -292,6 +292,14 @@ void MediaLibraryScanner::ProcessFile(BEntry &entry) {
   item.mbTrackId = mbTrackId;
   item.mbAlbumId = mbAlbumId;
   item.mbArtistId = mbArtistId;
+  ReplayGainInfo rg;
+  if (!isMidiFile && MetadataTagIO::ReadReplayGain(path, rg)) {
+    item.rgTrackGain = rg.trackGain;
+    item.rgTrackPeak = rg.trackPeak;
+    item.rgAlbumGain = rg.albumGain;
+    item.rgAlbumPeak = rg.albumPeak;
+  }
+
   if (hasBfsData && bfsData.rating > 0) {
     item.rating = bfsData.rating;
     DEBUG_PRINT("Read rating %d (BFS) for %s\n", (int)item.rating,
@@ -424,6 +432,11 @@ void MediaLibraryScanner::FlushBatch() {
     msg.AddInt64("mtime", item.mtime);
     msg.AddInt64("inode", item.inode);
     msg.AddInt32("rating", item.rating);
+    // Always added, NaN included, so index i matches path i.
+    msg.AddFloat("rgTrackGain", item.rgTrackGain);
+    msg.AddFloat("rgTrackPeak", item.rgTrackPeak);
+    msg.AddFloat("rgAlbumGain", item.rgAlbumGain);
+    msg.AddFloat("rgAlbumPeak", item.rgAlbumPeak);
     if (item.rating > 0)
       DEBUG_PRINT("FlushBatch: Sending rating %d for %s\n",
                   (int)item.rating, item.path.String());

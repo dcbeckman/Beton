@@ -25,7 +25,7 @@ namespace {
 /** @brief Header magic of the binary cache format. */
 const uint32 kCacheMagic = 'BTCA';
 /** @brief Cache format version this build writes and is able to read. */
-const uint32 kCacheVersion = 2;
+const uint32 kCacheVersion = 3;
 
 /**
  * @brief Smallest possible on-disk record.
@@ -133,7 +133,7 @@ const int kMaxResyncProbes = 64;
  *         path written came from BPath, so a non-absolute one means the
  *         record boundaries have drifted and the bytes cannot be trusted.
  */
-bool ReadRecord(CacheReader &reader, MediaItem &e) {
+bool ReadRecord(CacheReader &reader, MediaItem &e, uint32 version) {
   if (!reader.ReadString(e.path) || !reader.ReadString(e.base) ||
       !reader.ReadString(e.title) || !reader.ReadString(e.artist) ||
       !reader.ReadString(e.album) || !reader.ReadString(e.albumArtist) ||
@@ -155,6 +155,17 @@ bool ReadRecord(CacheReader &reader, MediaItem &e) {
   if (!reader.Read(flags))
     return false;
   e.missing = (flags & 1) != 0;
+
+  if (version >= 3) {
+    // v3: ReplayGain. NaN when the file has no tags.
+    if (!reader.Read(e.rgTrackGain) || !reader.Read(e.rgTrackPeak) ||
+        !reader.Read(e.rgAlbumGain) || !reader.Read(e.rgAlbumPeak))
+      return false;
+  } else {
+    // A v2 cache never stored ReplayGain. Forget the mtime so the next scan
+    // reads every file once and picks up tags written meanwhile.
+    e.mtime = 0;
+  }
 
   return !e.path.IsEmpty() && e.path.ByteAt(0) == '/';
 }
@@ -642,6 +653,11 @@ void MediaLibraryCache::SaveCache() {
 
     uint8 flags = e.missing ? 1 : 0;
     writer.Write(flags);
+
+    writer.Write(e.rgTrackGain);
+    writer.Write(e.rgTrackPeak);
+    writer.Write(e.rgAlbumGain);
+    writer.Write(e.rgAlbumPeak);
   }
 
   if (!writer.Finish()) {
@@ -809,7 +825,7 @@ MediaLibraryCache::_ReadBinaryCache(BFile &file, off_t fileSize) {
     const off_t recordStart = reader.Position();
 
     MediaItem e;
-    if (ReadRecord(reader, e)) {
+    if (ReadRecord(reader, e, version)) {
       fSalvage.recovered++;
       if (IsDisabledMidiPath(e.path))
         fCacheDirty = true;
@@ -821,7 +837,8 @@ MediaLibraryCache::_ReadBinaryCache(BFile &file, off_t fileSize) {
     // The record is damaged or the file ended early. Look for the next intact
     // one; finding none means there is nothing left worth reading.
     damaged = true;
-    const off_t resume = _ResyncToNextRecord(file, recordStart, fileSize);
+    const off_t resume =
+        _ResyncToNextRecord(file, recordStart, fileSize, version);
     if (resume < 0 || !reader.SeekTo(resume))
       break;
 
@@ -864,7 +881,7 @@ MediaLibraryCache::_ReadBinaryCache(BFile &file, off_t fileSize) {
 }
 
 off_t MediaLibraryCache::_ResyncToNextRecord(BFile &file, off_t after,
-                                             off_t fileSize) {
+                                             off_t fileSize, uint32 version) {
   off_t from = after + 1;
 
   for (int probe = 0; probe < kMaxResyncProbes; probe++) {
@@ -876,7 +893,7 @@ off_t MediaLibraryCache::_ResyncToNextRecord(BFile &file, off_t after,
     // whole record actually parses from it.
     CacheReader trial(file, fileSize);
     MediaItem item;
-    if (trial.SeekTo(candidate) && ReadRecord(trial, item))
+    if (trial.SeekTo(candidate) && ReadRecord(trial, item, version))
       return candidate;
 
     from = candidate + 1;
@@ -1061,6 +1078,7 @@ void MediaLibraryCache::MessageReceived(BMessage *msg) {
       msg->FindInt64("mtime", i, &e.mtime);
       msg->FindInt64("inode", i, &e.inode);
       msg->FindInt32("rating", i, &e.rating);
+      e.ReadGainFields(*msg, i);
       if (e.rating > 0)
         DEBUG_PRINT("Received rating %d for %s\n", (int)e.rating,
                     e.path.String());
@@ -1128,6 +1146,7 @@ void MediaLibraryCache::MessageReceived(BMessage *msg) {
     msg->FindInt64("size", &e.size);
     msg->FindInt64("mtime", &e.mtime);
     msg->FindInt64("inode", &e.inode);
+    e.ReadGainFields(*msg);
 
     if (msg->FindString("mbAlbumId", &tmpStr) == B_OK ||
         msg->FindString("mbAlbumID", &tmpStr) == B_OK)
@@ -1786,6 +1805,14 @@ void MediaLibraryCache::_ScanAndAddFile(const BString &pathStr) {
     item.rating = td.rating;
   }
 
+  ReplayGainInfo rg;
+  if (MetadataTagIO::ReadReplayGain(path, rg)) {
+    item.rgTrackGain = rg.trackGain;
+    item.rgTrackPeak = rg.trackPeak;
+    item.rgAlbumGain = rg.albumGain;
+    item.rgAlbumPeak = rg.albumPeak;
+  }
+
   AddOrUpdateEntry(item);
   _ScheduleSave();
 
@@ -1807,6 +1834,10 @@ void MediaLibraryCache::_ScanAndAddFile(const BString &pathStr) {
     update.AddInt32("rating", item.rating);
     update.AddInt32("duration", item.duration);
     update.AddInt32("bitrate", item.bitrate);
+    update.AddFloat("rgTrackGain", item.rgTrackGain);
+    update.AddFloat("rgTrackPeak", item.rgTrackPeak);
+    update.AddFloat("rgAlbumGain", item.rgAlbumGain);
+    update.AddFloat("rgAlbumPeak", item.rgAlbumPeak);
     fTarget.SendMessage(&update);
   }
 }

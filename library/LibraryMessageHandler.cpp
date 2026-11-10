@@ -110,6 +110,11 @@ bool LibraryMessageHandler::HandleMessage(BMessage *msg) {
     break;
   }
 
+  case MSG_LOUDNESS_PROGRESS: {
+    fWindow->fLibraryController->HandleLoudnessResult(msg);
+    break;
+  }
+
   case MSG_CD_RIP_IMPORT: {
     fWindow->fLibraryController->ImportRippedFiles(msg);
     break;

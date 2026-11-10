@@ -145,7 +145,8 @@ private:
    * reader off into nonsense.
    * @return Offset of the next parseable record, or -1 if there is none.
    */
-  off_t _ResyncToNextRecord(BFile &file, off_t after, off_t fileSize);
+  off_t _ResyncToNextRecord(BFile &file, off_t after, off_t fileSize,
+                            uint32 version);
 
   /**
    * @brief Drops salvaged entries that disagree with the file on disk.

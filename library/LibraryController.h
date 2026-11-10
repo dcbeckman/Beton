@@ -71,6 +71,12 @@ public:
   void AnalyzeLoudness(BMessage* msg);
 
   /**
+   * @brief Stores gain values the loudness analysis wrote into a file.
+   * @param msg MSG_LOUDNESS_PROGRESS with "path" and rg* floats.
+   */
+  void HandleLoudnessResult(BMessage* msg);
+
+  /**
    * @brief Handles initial cache-load completion and refreshes views.
    */
   void HandleCacheLoaded();
