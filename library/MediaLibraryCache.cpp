@@ -25,7 +25,7 @@ namespace {
 /** @brief Header magic of the binary cache format. */
 const uint32 kCacheMagic = 'BTCA';
 /** @brief Cache format version this build writes and is able to read. */
-const uint32 kCacheVersion = 3;
+const uint32 kCacheVersion = 4;
 
 /**
  * @brief Smallest possible on-disk record.
@@ -161,9 +161,12 @@ bool ReadRecord(CacheReader &reader, MediaItem &e, uint32 version) {
     if (!reader.Read(e.rgTrackGain) || !reader.Read(e.rgTrackPeak) ||
         !reader.Read(e.rgAlbumGain) || !reader.Read(e.rgAlbumPeak))
       return false;
-  } else {
-    // A v2 cache never stored ReplayGain. Forget the mtime so the next scan
-    // reads every file once and picks up tags written meanwhile.
+  }
+  if (version < 4) {
+    // Older caches lack ReplayGain (v2), and before v4 the scanner never read
+    // album artist or the MusicBrainz album/track IDs, which album grouping
+    // depends on. Forget the mtime so the next scan reads every file once.
+    // v4 has the same layout as v3.
     e.mtime = 0;
   }
 
@@ -1068,6 +1071,8 @@ void MediaLibraryCache::MessageReceived(BMessage *msg) {
         e.album = tmp;
       if (msg->FindString("genre", i, &tmp) == B_OK)
         e.genre = tmp;
+      if (msg->FindString("albumArtist", i, &tmp) == B_OK)
+        e.albumArtist = tmp;
 
       msg->FindInt32("year", i, &e.year);
       msg->FindInt32("track", i, &e.track);

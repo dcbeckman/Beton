@@ -172,7 +172,7 @@ void MediaLibraryScanner::ProcessFile(BEntry &entry) {
   fFoundFiles++;
   ReportProgress();
 
-  BString title, artist, album, genre;
+  BString title, artist, album, albumArtist, genre;
   int32 year = 0;
   int32 track = 0;
   int32 disc = 0;
@@ -215,13 +215,16 @@ void MediaLibraryScanner::ProcessFile(BEntry &entry) {
           }
         };
 
-        BString localMbTrackId, localMbAlbumId, localMbArtistId;
-        getProp("MUSICBRAINZ_TRACKID", localMbTrackId);
-        getProp("MUSICBRAINZ_ALBUMID", localMbAlbumId);
-        getProp("MUSICBRAINZ_ARTISTID", localMbArtistId);
+        // TagLib maps TPE2 (ID3v2), ALBUMARTIST (Vorbis) and aART (MP4)
+        // all to ALBUMARTIST. The library groups albums by album artist, so
+        // without it a compilation splits into one album per track artist.
+        getProp("ALBUMARTIST", albumArtist);
+        if (albumArtist.IsEmpty())
+          getProp("ALBUM ARTIST", albumArtist);
 
-        if (!localMbArtistId.IsEmpty())
-          mbArtistId = localMbArtistId;
+        getProp("MUSICBRAINZ_TRACKID", mbTrackId);
+        getProp("MUSICBRAINZ_ALBUMID", mbAlbumId);
+        getProp("MUSICBRAINZ_ARTISTID", mbArtistId);
       }
 
       if (!f.isNull() && f.audioProperties()) {
@@ -280,6 +283,7 @@ void MediaLibraryScanner::ProcessFile(BEntry &entry) {
   item.title = title;
   item.artist = artist;
   item.album = album;
+  item.albumArtist = albumArtist;
   item.genre = genre;
   item.year = year;
   item.track = track;
@@ -422,6 +426,11 @@ void MediaLibraryScanner::FlushBatch() {
     msg.AddString("title", item.title);
     msg.AddString("artist", item.artist);
     msg.AddString("album", item.album);
+    // Always added, empty included, so index i matches path i.
+    msg.AddString("albumArtist", item.albumArtist);
+    msg.AddString("mbAlbumId", item.mbAlbumId);
+    msg.AddString("mbArtistId", item.mbArtistId);
+    msg.AddString("mbTrackId", item.mbTrackId);
     msg.AddString("genre", item.genre);
     msg.AddInt32("year", item.year);
     msg.AddInt32("track", item.track);

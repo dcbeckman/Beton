@@ -983,6 +983,14 @@ void LibraryController::HandleMediaBatch(BMessage *msg) {
         itemToUpdate->album = tmp;
       if (msg->FindString("genre", i, &tmp) == B_OK)
         itemToUpdate->genre = tmp;
+      if (msg->FindString("albumArtist", i, &tmp) == B_OK)
+        itemToUpdate->albumArtist = tmp;
+      if (msg->FindString("mbAlbumId", i, &tmp) == B_OK)
+        itemToUpdate->mbAlbumId = tmp;
+      if (msg->FindString("mbArtistId", i, &tmp) == B_OK)
+        itemToUpdate->mbArtistId = tmp;
+      if (msg->FindString("mbTrackId", i, &tmp) == B_OK)
+        itemToUpdate->mbTrackId = tmp;
 
       int32 val;
       if (msg->FindInt32("year", i, &val) == B_OK)
