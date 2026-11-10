@@ -1,4 +1,5 @@
 #include "LibraryController.h"
+#include "LoudnessAnalyzer.h"
 #include "MainWindow.h"
 #include "MetadataPropertiesWindow.h"
 #include "LibraryBrowserController.h"
@@ -26,7 +27,9 @@
 #include <TextView.h>
 #include <Volume.h>
 #include <algorithm>
+#include <cmath>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -98,6 +101,170 @@ void LibraryController::ImportRippedFiles(BMessage *msg) {
               (long)queued);
   if (queued > 0)
     BMessenger(fWindow->fMediaLibraryCache).SendMessage(&scan);
+}
+
+namespace {
+
+bool IsAudioFileName(const char *name) {
+  BString lower(name);
+  lower.ToLower();
+  static const char *exts[] = {".mp3", ".flac", ".wav", ".ogg",
+                               ".m4a", ".aac",  ".wma"};
+  for (const char *ext : exts)
+    if (lower.EndsWith(ext))
+      return true;
+  return false;
+}
+
+/** Number of audio files in @p dir whose album tag is @p album. */
+size_t CountAlbumFiles(const BString &dir, const BString &album) {
+  BDirectory d(dir.String());
+  BEntry entry;
+  size_t count = 0;
+  while (d.GetNextEntry(&entry) == B_OK) {
+    BPath p;
+    if (entry.GetPath(&p) != B_OK || !entry.IsFile() || !IsAudioFileName(p.Leaf()))
+      continue;
+    TagData td;
+    if (MetadataTagIO::ReadTags(p, td, false) && td.album == album)
+      count++;
+  }
+  return count;
+}
+
+void SendStatus(const BMessenger &target, const BString &text) {
+  BMessage status(MSG_STATUS_UPDATE);
+  status.AddString("text", text);
+  target.SendMessage(&status);
+}
+
+} // namespace
+
+void LibraryController::AnalyzeLoudness(BMessage *msg) {
+  std::vector<BString> paths;
+  BMessage files;
+  if (msg->FindMessage("files", &files) == B_OK) {
+    entry_ref ref;
+    for (int32 i = 0; files.FindRef("refs", i, &ref) == B_OK; i++) {
+      BPath p(&ref);
+      if (p.InitCheck() == B_OK)
+        paths.push_back(p.Path());
+    }
+  }
+  if (paths.empty())
+    return;
+
+  if (fLoudnessRunning.exchange(true)) {
+    SendStatus(BMessenger(fWindow),
+               B_TRANSLATE("Loudness analysis is already running."));
+    return;
+  }
+
+  BMessenger target(fWindow);
+  std::atomic<bool> *shuttingDown = &fWindow->fShuttingDown;
+  std::atomic<bool> *running = &fLoudnessRunning;
+
+  fWindow->LaunchThread("loudness_analysis", [paths, target, shuttingDown,
+                                              running]() {
+    // Group by folder and album tag: album gain needs the whole album.
+    std::map<BString, std::vector<size_t>> albums;
+    std::vector<BString> albumNames(paths.size());
+    for (size_t i = 0; i < paths.size(); i++) {
+      TagData td;
+      MetadataTagIO::ReadTags(BPath(paths[i].String()), td, false);
+      albumNames[i] = td.album;
+      BPath parent;
+      BPath(paths[i].String()).GetParent(&parent);
+      BString key(parent.Path());
+      // Untitled files never form an album with each other.
+      key << '\n' << (td.album.IsEmpty() ? paths[i] : td.album);
+      albums[key].push_back(i);
+    }
+
+    size_t done = 0, failed = 0, albumsTagged = 0, partialAlbums = 0;
+    BString text;
+    for (const auto &[key, members] : albums) {
+      std::vector<double> blocks;
+      double peak = 0;
+      std::vector<BString> measured;
+
+      for (size_t index : members) {
+        if (shuttingDown->load())
+          break;
+        const BString &path = paths[index];
+        text.SetToFormat(B_TRANSLATE("Analyzing loudness: %zu of %zu, %s"),
+                         done + failed + 1, paths.size(),
+                         BPath(path.String()).Leaf());
+        SendStatus(target, text);
+
+        std::unique_ptr<LoudnessMeter> meter;
+        BString error;
+        status_t status =
+            LoudnessAnalyzer::AnalyzeFile(path.String(), shuttingDown, meter, error);
+        if (status == B_CANCELED)
+          break;
+        if (status != B_OK || !std::isfinite(meter->Loudness())) {
+          DEBUG_PRINT("Loudness: %s: %s\n", path.String(), error.String());
+          failed++;
+          continue;
+        }
+
+        ReplayGainInfo gain;
+        gain.trackGain = (float)meter->Gain();
+        gain.trackPeak = (float)meter->Peak();
+        if (MetadataTagIO::WriteReplayGain(BPath(path.String()), gain)) {
+          done++;
+          measured.push_back(path);
+          blocks.insert(blocks.end(), meter->Blocks().begin(),
+                        meter->Blocks().end());
+          peak = std::max(peak, meter->Peak());
+        } else {
+          failed++;
+        }
+      }
+      if (shuttingDown->load())
+        break;
+
+      const BString &album = albumNames[members.front()];
+      if (album.IsEmpty() || measured.size() != members.size())
+        continue;
+      BPath parent;
+      BPath(measured.front().String()).GetParent(&parent);
+      if (CountAlbumFiles(parent.Path(), album) != members.size()) {
+        partialAlbums++;
+        continue;
+      }
+
+      ReplayGainInfo gain;
+      gain.albumGain = (float)LoudnessMeter::GainFor(
+          LoudnessMeter::GatedLoudness(blocks));
+      gain.albumPeak = (float)peak;
+      for (const BString &path : measured)
+        MetadataTagIO::WriteReplayGain(BPath(path.String()), gain);
+      albumsTagged++;
+    }
+
+    if (shuttingDown->load()) {
+      running->store(false);
+      return;
+    }
+
+    text.SetToFormat(B_TRANSLATE("Loudness analyzed: %zu tracks, %zu albums"),
+                     done, albumsTagged);
+    if (failed > 0) {
+      BString part;
+      part.SetToFormat(B_TRANSLATE(", %zu could not be read or tagged"), failed);
+      text << part;
+    }
+    if (partialAlbums > 0) {
+      BString part;
+      part.SetToFormat(B_TRANSLATE(", %zu partly selected albums got track "
+                                   "gain only"), partialAlbums);
+      text << part;
+    }
+    SendStatus(target, text);
+    running->store(false);
+  });
 }
 
 void LibraryController::HandleFileMove(BMessage *msg) {

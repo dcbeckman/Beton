@@ -246,6 +246,8 @@ PlaybackQueueManager::ToggleShuffle()
 
   fShuffleEnabled = !fShuffleEnabled;
   fShuffleHistory.clear();
+  if (fWindow->fPlaybackEngine)
+    fWindow->fPlaybackEngine->SetShuffleHint(fShuffleEnabled);
   _UpdateShuffleIcon();
   if (fWindow->fViewStateController) {
     fWindow->fViewStateController->UpdateTooltips();
@@ -294,6 +296,8 @@ PlaybackQueueManager::SetShuffleEnabled(bool enabled)
 
   fShuffleEnabled = enabled;
   fShuffleHistory.clear();
+  if (fWindow->fPlaybackEngine)
+    fWindow->fPlaybackEngine->SetShuffleHint(fShuffleEnabled);
   _UpdateShuffleIcon();
 }
 

@@ -82,6 +82,9 @@ void SettingsController::SaveSettingsToMessage(BMessage &state) {
     state.AddInt32("repeat_mode",
                    fWindow->fPlaybackQueueManager->RepeatModeValue());
   }
+  if (fWindow->fPlaybackEngine)
+    state.AddInt32("replaygain_mode",
+                   fWindow->fPlaybackEngine->ReplayGainModeValue());
   state.AddBool("show_tooltips", fWindow->fShowTooltips);
   state.AddBool("fast_edit_enabled", fWindow->fFastEditEnabled);
 
@@ -230,6 +233,10 @@ void SettingsController::LoadSettingsFromMessage(BMessage &state) {
     if (fWindow->fPlaybackQueueManager)
       fWindow->fPlaybackQueueManager->SetShuffleEnabled(shuffleEnabled);
   }
+
+  int32 replayGainMode = AudioPlaybackEngine::kReplayGainAuto;
+  state.FindInt32("replaygain_mode", &replayGainMode);
+  fWindow->SetReplayGainMode(replayGainMode);
 
   int32 repeatMode = PlaybackQueueManager::RepeatOff;
   if (state.FindInt32("repeat_mode", &repeatMode) == B_OK) {

@@ -163,6 +163,23 @@ public:
   int32 CurrentIndex() const; ///< Index of currently playing track.
   ///@}
 
+  /** @name ReplayGain */
+  ///@{
+  /** How playback uses REPLAYGAIN_* tags. Values are stored in settings. */
+  enum ReplayGainMode : int32 {
+    kReplayGainOff = 0,
+    kReplayGainTrack = 1, ///< Level every track to the same loudness.
+    kReplayGainAlbum = 2, ///< Album gain, track gain where a file has none.
+    kReplayGainAuto = 3   ///< Album gain for an album played in order.
+  };
+  void SetReplayGainMode(int32 mode);
+  int32 ReplayGainModeValue() const { return fReplayGainMode.load(); }
+  /** Auto mode uses track gain while shuffle is on. */
+  void SetShuffleHint(bool shuffle) { fShuffleHint.store(shuffle); }
+  /** Gain applied to the current track in dB (0 when none). */
+  float CurrentReplayGainDb() const { return fReplayGainDb.load(); }
+  ///@}
+
   /** @name Queue Management */
   ///@{
   void SetQueue(const std::vector<std::string> &queue);
@@ -197,6 +214,10 @@ private:
   void _BeginFadeOut();
   void _ApplyFade(void *buffer, size_t size,
                   const media_raw_audio_format &format);
+  /** Works out fReplayGain for queue entry @p index from its tags. */
+  void _UpdateReplayGain(size_t index);
+  /** True if a queue neighbour of @p index is the adjacent album track. */
+  bool _IsPlayedInAlbumOrder(size_t index);
 #if ENABLE_LOCAL_OUTPUT
   /**
    * @brief Fill @p buffer with resampled local-file audio (direct output).
@@ -256,6 +277,12 @@ private:
   // while written on the control thread. std::atomic<float> provides implicit
   // load/store, so existing use-sites are unchanged.
   std::atomic<float> fVolume{1.0f};
+  /** ReplayGain as a linear factor, read on the audio thread in _ApplyFade.
+   *  Already limited so that the track's peak does not clip. */
+  std::atomic<float> fReplayGain{1.0f};
+  std::atomic<float> fReplayGainDb{0.0f};
+  std::atomic<int32> fReplayGainMode{kReplayGainAuto};
+  std::atomic<bool> fShuffleHint{false};
   std::atomic<int32> fCurrentBitrate{0};
   std::atomic<int32> fCurrentSampleRate{0};
   std::atomic<int32> fCurrentChannels{0};

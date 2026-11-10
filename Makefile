@@ -12,6 +12,8 @@ SRCS = \
     app/UndoManager.cpp \
     audio/AudioOutputManager.cpp \
     audio/AudioResampler.cpp \
+    audio/LoudnessAnalyzer.cpp \
+    audio/LoudnessMeter.cpp \
     audio/OutputViewController.cpp \
     artwork/ArtworkController.cpp \
     dlna/DLNAMessageHandler.cpp \

@@ -15,6 +15,7 @@
 #include <Path.h>
 
 #include <algorithm>
+#include <cmath>
 #include <errno.h>
 #include <set>
 #include <stdio.h>
@@ -328,6 +329,9 @@ void CDRipper::_DetectOffset() {
 void CDRipper::_Run() {
   int32 ripped = 0, skipped = 0, failed = 0, accurate = 0, noMatch = 0;
   std::set<BString> written;
+  std::vector<BString> rippedFiles;
+  std::vector<double> albumBlocks;
+  double albumPeak = 0;
   BMessage finished(MSG_CD_RIP_FINISHED);
 
   BString layoutError;
@@ -356,16 +360,21 @@ void CDRipper::_Run() {
     RipVerdict verdict = kRipNotChecked;
     int32 confidence = -1;
     AccurateRip::Checksum checksum;
+    LoudnessMeter loudness(44100, 2);
 
     if (BEntry(dest.String()).Exists()) {
       status = B_FILE_EXISTS;
       skipped++;
     } else {
-      status = _RipTrack(i, dest, checksum, error);
+      status = _RipTrack(i, dest, checksum, loudness, error);
       if (status == B_OK) {
         ripped++;
         written.insert(dest);
         finished.AddString("path", dest);
+        rippedFiles.push_back(dest);
+        albumBlocks.insert(albumBlocks.end(), loudness.Blocks().begin(),
+                           loudness.Blocks().end());
+        albumPeak = std::max(albumPeak, loudness.Peak());
 
         if (fLookup == kRipAccurate) {
           confidence = std::max(fDatabase.Match(i, checksum.V2()),
@@ -398,8 +407,15 @@ void CDRipper::_Run() {
     done.AddString("error", error);
     done.AddInt32("ar", verdict);
     done.AddInt32("ar_confidence", confidence);
+    if (status == B_OK && std::isfinite(loudness.Loudness()))
+      done.AddFloat("rg_gain", (float)loudness.Gain());
     fTarget.SendMessage(&done);
   }
+
+  // Album gain is only meaningful for the whole album, so only a rip that
+  // covered every track gets it.
+  if (!fCancel && ripped > 0 && ripped == (int32)fJob.tracks.size())
+    _WriteAlbumGain(rippedFiles, albumBlocks, albumPeak);
 
   finished.AddInt32("ripped", ripped);
   finished.AddInt32("skipped", skipped);
@@ -416,7 +432,8 @@ void CDRipper::_Run() {
 }
 
 status_t CDRipper::_RipTrack(size_t index, const BString &dest,
-                             AccurateRip::Checksum &checksum, BString &error) {
+                             AccurateRip::Checksum &checksum,
+                             LoudnessMeter &loudness, BString &error) {
   const MediaItem &track = fJob.tracks[index];
   const Span &span = fSpans[index];
 
@@ -472,6 +489,7 @@ status_t CDRipper::_RipTrack(size_t index, const BString &dest,
 #if B_HOST_IS_BENDIAN
     swap_data(B_INT16_TYPE, buffer.data(), n * 4, B_SWAP_LENDIAN_TO_HOST);
 #endif
+    loudness.AddFrames(reinterpret_cast<const int16 *>(buffer.data()), n);
     status = encoder->Write(reinterpret_cast<const int16 *>(buffer.data()),
                             (int32)n);
     if (status != B_OK) {
@@ -498,7 +516,29 @@ status_t CDRipper::_RipTrack(size_t index, const BString &dest,
   }
 
   _FinishFile(dest, track);
+
+  if (std::isfinite(loudness.Loudness())) {
+    ReplayGainInfo gain;
+    gain.trackGain = (float)loudness.Gain();
+    gain.trackPeak = (float)loudness.Peak();
+    if (!MetadataTagIO::WriteReplayGain(BPath(dest.String()), gain))
+      DEBUG_PRINT("CD rip: could not write ReplayGain to %s\n", dest.String());
+  }
   return B_OK;
+}
+
+void CDRipper::_WriteAlbumGain(const std::vector<BString> &files,
+                               const std::vector<double> &blocks, double peak) {
+  const double lufs = LoudnessMeter::GatedLoudness(blocks);
+  if (!std::isfinite(lufs))
+    return;
+  ReplayGainInfo gain;
+  gain.albumGain = (float)LoudnessMeter::GainFor(lufs);
+  gain.albumPeak = (float)peak;
+  DEBUG_PRINT("CD rip: album loudness %.2f LUFS, gain %+.2f dB, peak %.4f\n",
+              lufs, gain.albumGain, peak);
+  for (const BString &file : files)
+    MetadataTagIO::WriteReplayGain(BPath(file.String()), gain);
 }
 
 void CDRipper::_FinishFile(const BString &dest, const MediaItem &track) {

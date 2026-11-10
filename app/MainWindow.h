@@ -124,6 +124,8 @@ public:
   ///@{
   void LoadSettings();
   void SaveSettings();
+  /** Sets the ReplayGain playback mode and marks it in the Settings menu. */
+  void SetReplayGainMode(int32 mode);
 
   ///@}
 
@@ -250,6 +252,7 @@ private:
   ///@{
   BMenuBar *fMenuBar;
   BMenu *fSettingsMenu = nullptr;
+  BMenu *fReplayGainMenu = nullptr;
   BButton *fBtnPrev;
   BButton *fBtnPlayPause;
   BButton *fBtnStop;

@@ -1,0 +1,29 @@
+#ifndef BETON_LOUDNESS_ANALYZER_H
+#define BETON_LOUDNESS_ANALYZER_H
+
+#include "LoudnessMeter.h"
+
+#include <String.h>
+#include <SupportDefs.h>
+
+#include <atomic>
+#include <memory>
+
+/**
+ * @namespace LoudnessAnalyzer
+ * @brief Measures the loudness of an audio file by decoding it with FFmpeg.
+ */
+namespace LoudnessAnalyzer {
+
+/**
+ * @brief Decodes @p path and runs it through a LoudnessMeter.
+ * @param cancel Checked between packets; may be null.
+ * @param out Receives the meter (loudness, peak and blocks for album gain).
+ * @return B_OK, B_CANCELED, or an error with @p error set.
+ */
+status_t AnalyzeFile(const char *path, const std::atomic<bool> *cancel,
+                     std::unique_ptr<LoudnessMeter> &out, BString &error);
+
+} // namespace LoudnessAnalyzer
+
+#endif // BETON_LOUDNESS_ANALYZER_H

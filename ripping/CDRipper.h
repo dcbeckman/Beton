@@ -3,6 +3,7 @@
 
 #include "AccurateRip.h"
 #include "CDRipSettings.h"
+#include "LoudnessMeter.h"
 #include "MediaItem.h"
 
 #include <File.h>
@@ -53,6 +54,10 @@ struct CDRipJob {
  * ~5 a second), MSG_CD_RIP_TRACK_DONE per track and one MSG_CD_RIP_FINISHED
  * at the end, including after Cancel().
  *
+ * Every track is also measured for ReplayGain 2.0 as it is encoded; its
+ * track gain is tagged straight away, and the album gain once the whole disc
+ * has been ripped in one go.
+ *
  * Each track is written to "<name>.part" and renamed once complete, so a
  * cancelled or failed track never leaves a truncated file behind. A file that
  * already exists is left alone and reported as skipped (status
@@ -90,7 +95,10 @@ private:
   void _LookUp();
   void _DetectOffset();
   status_t _RipTrack(size_t index, const BString &dest,
-                     AccurateRip::Checksum &checksum, BString &error);
+                     AccurateRip::Checksum &checksum, LoudnessMeter &loudness,
+                     BString &error);
+  void _WriteAlbumGain(const std::vector<BString> &files,
+                       const std::vector<double> &blocks, double peak);
   void _FinishFile(const BString &dest, const MediaItem &track);
   void _SendStatus(const char *text);
   void _SendProgress(size_t index, int64 framesDone, bool force);

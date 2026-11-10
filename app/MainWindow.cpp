@@ -728,6 +728,28 @@ void MainWindow::_BuildUI() {
   fLocalOutputSettingsMenuItem = new BMenuItem(fLocalOutputSettingsMenu);
   fSettingsMenu->AddItem(fLocalOutputSettingsMenuItem);
 #endif
+
+  // Values are AudioPlaybackEngine::ReplayGainMode.
+  fReplayGainMenu = new BMenu(B_TRANSLATE("ReplayGain"));
+  fReplayGainMenu->SetRadioMode(true);
+  const struct {
+    int32 mode;
+    const char *label;
+  } replayGainModes[] = {
+      {AudioPlaybackEngine::kReplayGainAuto,
+       B_TRANSLATE("Auto (album when played in order)")},
+      {AudioPlaybackEngine::kReplayGainTrack, B_TRANSLATE("Track")},
+      {AudioPlaybackEngine::kReplayGainAlbum, B_TRANSLATE("Album")},
+      {AudioPlaybackEngine::kReplayGainOff, B_TRANSLATE("Off")},
+  };
+  for (const auto &m : replayGainModes) {
+    BMessage *msg = new BMessage(MSG_REPLAYGAIN_MODE);
+    msg->AddInt32("mode", m.mode);
+    BMenuItem *item = new BMenuItem(m.label, msg);
+    item->SetMarked(m.mode == AudioPlaybackEngine::kReplayGainAuto);
+    fReplayGainMenu->AddItem(item);
+  }
+  fSettingsMenu->AddItem(fReplayGainMenu);
   fSettingsMenu->AddSeparatorItem();
 
   BMenu *sidebarMenu = new BMenu(B_TRANSLATE("Sidebar"));
@@ -1345,6 +1367,19 @@ void MainWindow::SaveSettings() {
 /**
  * @brief Loads UI state from settings file.
  */
+void MainWindow::SetReplayGainMode(int32 mode) {
+  if (fPlaybackEngine)
+    fPlaybackEngine->SetReplayGainMode(mode);
+  if (fReplayGainMenu == nullptr)
+    return;
+  for (int32 i = 0; BMenuItem *item = fReplayGainMenu->ItemAt(i); i++) {
+    int32 itemMode = -1;
+    if (item->Message() != nullptr)
+      item->Message()->FindInt32("mode", &itemMode);
+    item->SetMarked(itemMode == mode);
+  }
+}
+
 void MainWindow::LoadSettings() {
   if (fSettingsController)
     fSettingsController->LoadSettings();

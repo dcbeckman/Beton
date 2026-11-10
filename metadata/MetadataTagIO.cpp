@@ -1284,3 +1284,88 @@ bool MetadataTagIO::SmartMerge(const TagData &primary, const TagData &secondary,
 
   return changed || hasConflict;
 }
+
+// ---------------------------------------------------------------------------
+// ReplayGain
+// ---------------------------------------------------------------------------
+
+/** "-6.41 dB" or "0.949000" -> value; NaN if absent or unreadable. */
+static float _parseGainValue(const TagLib::PropertyMap &pm, const char *key) {
+  BString s = _getStr(pm, {key});
+  s.Trim();
+  if (s.IsEmpty())
+    return NAN;
+  char *end = nullptr;
+  const double v = strtod(s.String(), &end);
+  if (end == s.String() || !std::isfinite(v))
+    return NAN;
+  return (float)v;
+}
+
+bool MetadataTagIO::ReadReplayGain(const BPath &path, ReplayGainInfo &out) {
+  out = ReplayGainInfo();
+  if (path.InitCheck() != B_OK)
+    return false;
+
+  BAutolock guard(TagLibLock());
+  TagLib::FileRef fr(path.Path(), false);
+  if (fr.isNull() || !fr.file())
+    return false;
+
+  const TagLib::PropertyMap pm = fr.file()->properties();
+  out.trackGain = _parseGainValue(pm, "REPLAYGAIN_TRACK_GAIN");
+  out.trackPeak = _parseGainValue(pm, "REPLAYGAIN_TRACK_PEAK");
+  out.albumGain = _parseGainValue(pm, "REPLAYGAIN_ALBUM_GAIN");
+  out.albumPeak = _parseGainValue(pm, "REPLAYGAIN_ALBUM_PEAK");
+  return out.HasTrack() || out.HasAlbum();
+}
+
+bool MetadataTagIO::WriteReplayGain(const BPath &path, const ReplayGainInfo &in) {
+  if (path.InitCheck() != B_OK)
+    return false;
+  BString lower(path.Path());
+  lower.ToLower();
+  if (lower.EndsWith(".opus"))
+    return false;
+  if (access(path.Path(), W_OK) != 0) {
+    DEBUG_PRINT("WriteReplayGain: file is read-only: %s\n", path.Path());
+    return false;
+  }
+
+  BAutolock guard(TagLibLock());
+  TagLib::FileRef fr(path.Path(), false);
+  if (fr.isNull() || !fr.file())
+    return false;
+
+  TagLib::PropertyMap pm = fr.file()->properties();
+  auto setValue = [&pm](const char *key, float value, const char *format) {
+    if (std::isnan(value))
+      return;
+    BString text;
+    text.SetToFormat(format, (double)value);
+    pm.replace(TagLib::String(key, TagLib::String::UTF8),
+               TagLib::StringList(TLs(text)));
+  };
+  setValue("REPLAYGAIN_TRACK_GAIN", in.trackGain, "%.2f dB");
+  setValue("REPLAYGAIN_TRACK_PEAK", in.trackPeak, "%.6f");
+  setValue("REPLAYGAIN_ALBUM_GAIN", in.albumGain, "%.2f dB");
+  setValue("REPLAYGAIN_ALBUM_PEAK", in.albumPeak, "%.6f");
+
+  fr.file()->setProperties(pm);
+  bool ok;
+  // Save only the tag types the file already has, plus ID3v2 for the gain.
+  // TagLib 1.13 creates an ID3v1 tag when told to save AllTags, even with
+  // DoNotDuplicate (seen on HaikuBox, hrev60368).
+  if (auto *mpeg = dynamic_cast<TagLib::MPEG::File *>(fr.file())) {
+    int tags = TagLib::MPEG::File::ID3v2;
+    if (mpeg->hasID3v1Tag())
+      tags |= TagLib::MPEG::File::ID3v1;
+    if (mpeg->hasAPETag())
+      tags |= TagLib::MPEG::File::APE;
+    ok = mpeg->save(tags, TagLib::File::StripNone, TagLib::ID3v2::v4,
+                    TagLib::File::DoNotDuplicate);
+  } else
+    ok = fr.save();
+  DEBUG_PRINT("WriteReplayGain %s: %s\n", path.Path(), ok ? "OK" : "failed");
+  return ok;
+}

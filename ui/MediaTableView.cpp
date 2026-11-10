@@ -1897,6 +1897,17 @@ void MediaTableView::MessageReceived(BMessage *msg) {
       }
       menu.AddItem(ratingMenu);
 
+      {
+        BMessage *m = new BMessage(MSG_ANALYZE_LOUDNESS);
+        if (filesMsg.HasRef("refs"))
+          m->AddMessage("files", &filesMsg);
+        BMenuItem *item =
+            new BMenuItem(B_TRANSLATE("Analyze Loudness (ReplayGain)"), m);
+        // Writes tags, so like Rating it needs writable files.
+        item->SetEnabled(!isReadOnly && filesMsg.HasRef("refs"));
+        menu.AddItem(item);
+      }
+
       menu.AddSeparatorItem();
       {
         BMessage *m = new BMessage(MSG_REVEAL_IN_TRACKER);

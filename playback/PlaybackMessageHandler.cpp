@@ -96,6 +96,14 @@ bool PlaybackMessageHandler::HandleMessage(BMessage *msg) {
     return true;
   }
 
+  case MSG_REPLAYGAIN_MODE: {
+    int32 mode = AudioPlaybackEngine::kReplayGainAuto;
+    msg->FindInt32("mode", &mode);
+    fWindow->SetReplayGainMode(mode);
+    fWindow->SaveSettings();
+    return true;
+  }
+
   case MSG_REPEAT_TOGGLE: {
     if (fWindow->fPlaybackQueueManager)
       fWindow->fPlaybackQueueManager->ToggleRepeat();

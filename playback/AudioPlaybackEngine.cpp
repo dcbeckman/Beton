@@ -3,6 +3,7 @@
 #include "Debug.h"
 #include "LocalFileHttpServer.h"
 #include "Messages.h"
+#include "MetadataTagIO.h"
 #include "NetworkAudioStreamIO.h"
 
 #if ENABLE_LOCAL_OUTPUT
@@ -415,7 +416,8 @@ void AudioPlaybackEngine::_ApplyFade(void *buffer, size_t size,
   }
 #endif
 
-  if (fadeIn <= 0 && fadeOut <= 0 && !needSoftwareVolume)
+  const float replayGain = fReplayGain.load(std::memory_order_relaxed);
+  if (fadeIn <= 0 && fadeOut <= 0 && !needSoftwareVolume && replayGain == 1.0f)
     return;
 
   auto gainForFrame = [&](int64 frame) {
@@ -432,10 +434,12 @@ void AudioPlaybackEngine::_ApplyFade(void *buffer, size_t size,
     }
 
     if (gain < 0.0f)
-      return 0.0f;
+      gain = 0.0f;
     if (gain > 1.0f)
-      return 1.0f;
-    return gain;
+      gain = 1.0f;
+    // ReplayGain may lift a quiet track above unity; it was limited to the
+    // track's peak when it was set, so it does not clip.
+    return gain * replayGain;
   };
 
   if (format.format == media_raw_audio_format::B_AUDIO_FLOAT) {
@@ -784,6 +788,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
   fCurrentIdx = trackIndex;
   const char *path = fQueue[trackIndex].c_str();
   DEBUG_PRINT("opening: %s\n", path);
+  _UpdateReplayGain(trackIndex);
 
 #if ENABLE_DLNA_OUTPUT || ENABLE_MIDI_PLAYBACK
   BString lowerPath = path;
@@ -1111,6 +1116,65 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
  *
  * @param url The stream URL to play.
  */
+void AudioPlaybackEngine::SetReplayGainMode(int32 mode) {
+  if (mode < kReplayGainOff || mode > kReplayGainAuto)
+    mode = kReplayGainAuto;
+  fReplayGainMode.store(mode);
+  // Takes effect from the next track; re-evaluate the current one now.
+  if (fCurrentIdx < fQueue.size() && !fIsStreaming.load())
+    _UpdateReplayGain(fCurrentIdx);
+}
+
+bool AudioPlaybackEngine::_IsPlayedInAlbumOrder(size_t index) {
+  TagData current;
+  if (!MetadataTagIO::ReadTags(BPath(fQueue[index].c_str()), current) ||
+      current.album.IsEmpty() || current.track == 0)
+    return false;
+
+  auto adjacent = [&](size_t other, int32 expectedTrack) {
+    if (other >= fQueue.size() || expectedTrack <= 0)
+      return false;
+    TagData t;
+    return MetadataTagIO::ReadTags(BPath(fQueue[other].c_str()), t) &&
+           t.album == current.album && (int32)t.track == expectedTrack;
+  };
+  return (index > 0 && adjacent(index - 1, (int32)current.track - 1)) ||
+         adjacent(index + 1, (int32)current.track + 1);
+}
+
+void AudioPlaybackEngine::_UpdateReplayGain(size_t index) {
+  float linear = 1.0f;
+  float db = 0.0f;
+  const int32 mode = fReplayGainMode.load();
+
+  ReplayGainInfo rg;
+  if (mode != kReplayGainOff && index < fQueue.size() &&
+      MetadataTagIO::ReadReplayGain(BPath(fQueue[index].c_str()), rg)) {
+    bool album = false;
+    if (mode == kReplayGainAlbum)
+      album = rg.HasAlbum();
+    else if (mode == kReplayGainAuto)
+      album = rg.HasAlbum() && !fShuffleHint.load() &&
+              _IsPlayedInAlbumOrder(index);
+
+    const float gain = album ? rg.albumGain : rg.trackGain;
+    const float peak = album ? rg.albumPeak : rg.trackPeak;
+    if (!std::isnan(gain)) {
+      db = gain;
+      linear = powf(10.0f, gain / 20.0f);
+      // Never push the loudest sample past full scale.
+      if (!std::isnan(peak) && peak > 0.0f && linear * peak > 1.0f) {
+        linear = 1.0f / peak;
+        db = 20.0f * log10f(linear);
+      }
+    }
+    DEBUG_PRINT("ReplayGain: %s gain %+.2f dB (tag %+.2f, peak %.4f) -> x%.4f\n",
+                album ? "album" : "track", db, gain, peak, linear);
+  }
+  fReplayGain.store(linear);
+  fReplayGainDb.store(db);
+}
+
 void AudioPlaybackEngine::PlayUrl(const BUrl &url, const char *title,
                                       int32 durationSeconds,
                                       BUrlContext *context) {
@@ -1123,6 +1187,9 @@ void AudioPlaybackEngine::PlayUrl(const BUrl &url, const char *title,
 #endif
   fCurrentUrl = url;
   fCurrentTitle = title ? title : "";
+  // Streams carry no ReplayGain tags.
+  fReplayGain.store(1.0f);
+  fReplayGainDb.store(0.0f);
 
   BAutolock lock(fPlayLock);
   DEBUG_PRINT("PlayUrl(%s, duration=%ld) called\n",

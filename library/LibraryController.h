@@ -5,6 +5,8 @@
 #include <MessageRunner.h>
 #include <String.h>
 
+#include <atomic>
+
 class MainWindow;
 
 /**
@@ -56,6 +58,17 @@ public:
    *        a library folder are added; the rest are left alone.
    */
   void ImportRippedFiles(BMessage* msg);
+
+  /**
+   * @brief Measures the loudness of the selected files on a background
+   *        thread and writes ReplayGain tags into them.
+   * @param msg MSG_ANALYZE_LOUDNESS with a "files" message of refs.
+   *
+   * Track gain is written for every file. Album gain is written only when
+   * the selection holds every file of that album in its folder, so it never
+   * describes part of an album.
+   */
+  void AnalyzeLoudness(BMessage* msg);
 
   /**
    * @brief Handles initial cache-load completion and refreshes views.
@@ -151,6 +164,9 @@ public:
   void RebuildPathIndex();
 
 private:
+  /** True while an AnalyzeLoudness() thread is running. */
+  std::atomic<bool> fLoudnessRunning{false};
+
   /**
    * @brief Scans every configured source, sidebar folder and saved playlist.
    *

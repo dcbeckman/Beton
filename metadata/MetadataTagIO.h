@@ -7,6 +7,7 @@
 #include <String.h>
 #include <SupportDefs.h>
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -132,6 +133,21 @@ struct CoverBlob {
   }
   const void *data() const { return bytes.empty() ? nullptr : bytes.data(); }
   size_t size() const { return bytes.size(); }
+};
+
+/**
+ * @struct ReplayGainInfo
+ * @brief ReplayGain 2.0 values of one file. Gains in dB relative to the
+ *        -18 LUFS reference, peaks linear (1.0 = full scale); NaN = not set.
+ */
+struct ReplayGainInfo {
+  float trackGain = NAN;
+  float trackPeak = NAN;
+  float albumGain = NAN;
+  float albumPeak = NAN;
+
+  bool HasTrack() const { return !std::isnan(trackGain); }
+  bool HasAlbum() const { return !std::isnan(albumGain); }
 };
 
 /**
@@ -294,6 +310,23 @@ bool IsCddaVolume(const BPath &path);
  * @return True on success.
  */
 bool ApplySync(const BPath &path, const TagData &source, bool towardsBfs);
+
+/**
+ * @brief Reads the REPLAYGAIN_* tags of a file.
+ * @return True if the file has at least a track or album gain.
+ */
+bool ReadReplayGain(const BPath &path, ReplayGainInfo &out);
+
+/**
+ * @brief Writes REPLAYGAIN_* tags, leaving every other tag as it was.
+ *
+ * Only the values that are set (not NaN) are written, so a track gain can be
+ * stored first and the album gain added once the whole album is measured.
+ * Uses Vorbis comments (FLAC, Ogg), TXXX frames (MP3, and the ID3v2 chunk of
+ * WAV) or iTunes freeform atoms (M4A) through TagLib's property interface.
+ * Opus files are skipped: their gain belongs in R128_* tags and the header.
+ */
+bool WriteReplayGain(const BPath &path, const ReplayGainInfo &in);
 
 } // namespace MetadataTagIO
 

@@ -53,6 +53,9 @@
 #define MSG_PREV_BTN 'prvB'       ///< Previous button clicked.
 #define MSG_SHUFFLE_TOGGLE 'shuf' ///< Toggle shuffle mode.
 #define MSG_REPEAT_TOGGLE 'rept'  ///< Toggle repeat mode.
+#define MSG_REPLAYGAIN_MODE 'rgmd' ///< Set ReplayGain playback "mode" (int32).
+#define MSG_ANALYZE_LOUDNESS 'rgan' ///< Measure and tag ReplayGain for the selected tracks.
+#define MSG_LOUDNESS_PROGRESS 'rgap' ///< Analysis thread -> window: progress/results.
 ///@}
 
 /** @name UI & Selection */

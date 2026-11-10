@@ -53,7 +53,7 @@ enum {
   kMsgVerifyChanged = 'rver'
 };
 
-enum { kColNumber, kColTitle, kColArtist, kColLength, kColStatus };
+enum { kColNumber, kColTitle, kColArtist, kColLength, kColGain, kColStatus };
 
 const float kProgressMax = 1000.0f;
 
@@ -89,7 +89,7 @@ BString FormatDuration(int32 seconds) {
 
 CDRipWindow::CDRipWindow(const BString &discPath, const BString &discLabel,
                          BMessenger libraryTarget)
-    : BWindow(BRect(0, 0, 640, 300), B_TRANSLATE("Rip audio CD"),
+    : BWindow(BRect(0, 0, 700, 300), B_TRANSLATE("Rip audio CD"),
               B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS |
                   B_ASYNCHRONOUS_CONTROLS | B_CLOSE_ON_ESCAPE),
@@ -103,8 +103,8 @@ CDRipWindow::CDRipWindow(const BString &discPath, const BString &discLabel,
   _UpdatePreview();
 
   ResizeToPreferred();
-  if (Bounds().Width() < 640)
-    ResizeTo(640, Bounds().Height());
+  if (Bounds().Width() < 700)
+    ResizeTo(700, Bounds().Height());
   CenterOnScreen();
 }
 
@@ -166,6 +166,9 @@ void CDRipWindow::_BuildUI() {
   fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Length"), 52, 40, 80,
                                           B_TRUNCATE_END, B_ALIGN_RIGHT),
                         kColLength);
+  fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Gain"), 62, 40, 90,
+                                          B_TRUNCATE_END, B_ALIGN_RIGHT),
+                        kColGain);
   fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Status"), 195, 60, 500,
                                           B_TRUNCATE_END), kColStatus);
   for (const MediaItem &t : fTracks) {
@@ -177,6 +180,7 @@ void CDRipWindow::_BuildUI() {
     row->SetField(new BStringField(t.artist.String()), kColArtist);
     row->SetField(new BStringField(FormatDuration(t.duration).String()),
                   kColLength);
+    row->SetField(new BStringField(""), kColGain);
     row->SetField(new BStringField(""), kColStatus);
     fTrackList->AddRow(row);
   }
@@ -475,8 +479,13 @@ void CDRipWindow::_StartRip() {
   job.offsetKnown = offsetKnown;
   job.offset = offset;
 
-  for (int32 i = 0; i < (int32)fTracks.size(); i++)
+  for (int32 i = 0; i < (int32)fTracks.size(); i++) {
+    if (BRow *row = fTrackList->RowAt(i)) {
+      if (auto *field = static_cast<BStringField *>(row->GetField(kColGain)))
+        field->SetString("");
+    }
     _SetTrackStatus(i, "");
+  }
   fCurrentTrack = -1;
   fCurrentPercent = -1;
 
@@ -562,6 +571,15 @@ void CDRipWindow::_HandleTrackDone(BMessage *msg) {
       break;
     default:
       text = B_TRANSLATE("Ripped");
+    }
+    float gain;
+    if (msg->FindFloat("rg_gain", &gain) == B_OK) {
+      BString gainText;
+      gainText.SetToFormat("%+.1f dB", gain);
+      if (BRow *row = fTrackList->RowAt(track)) {
+        if (auto *field = static_cast<BStringField *>(row->GetField(kColGain)))
+          field->SetString(gainText.String());
+      }
     }
   } else if (status == B_FILE_EXISTS) {
     text = B_TRANSLATE("Already there, not ripped again");
