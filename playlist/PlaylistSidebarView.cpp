@@ -208,6 +208,14 @@ void PlaylistSidebarView::MessageReceived(BMessage *msg) {
         newMsg.AddMessage("files", msg);
         fTarget.SendMessage(&newMsg);
       }
+    } else if (KindAt(dropIndex) == PlaylistItemKind::Library) {
+      // Onto "Library": the files (and folders' contents) join the library;
+      // the folders don't become sidebar folders.
+      BMessage add(MSG_ADD_TO_LIBRARY_REFS);
+      entry_ref ref;
+      for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; ++i)
+        add.AddRef("refs", &ref);
+      fTarget.SendMessage(&add);
     } else {
       if (!IsWritableAt(dropIndex)) {
         if (hasDirectoryRef && allRefsAreDirectories && fManager) {

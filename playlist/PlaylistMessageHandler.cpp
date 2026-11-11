@@ -2,6 +2,7 @@
 
 #include "CDRipWindow.h"
 #include "MainWindow.h"
+#include "LibraryController.h"
 #include "PlaylistEditController.h"
 #include "Messages.h"
 
@@ -88,6 +89,15 @@ bool PlaylistMessageHandler::HandleMessage(BMessage *msg) {
   }
 
   case B_SIMPLE_DATA: {
+    // Files dropped straight onto the track list while it shows the library
+    // (drops onto the sidebar arrive with a "playlist" field).
+    if (!msg->HasString("playlist") && msg->HasRef("refs") &&
+        fWindow->fIsLibraryMode && !fWindow->fIsCDMode &&
+        !fWindow->fIsRadioMode && !fWindow->fIsDlnaMode &&
+        !fWindow->fIsFolderMode) {
+      fWindow->fLibraryController->AddRefsToLibrary(msg);
+      break;
+    }
     fWindow->fPlaylistEditController->HandlePlaylistDrop(msg);
     break;
   }

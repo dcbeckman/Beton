@@ -270,6 +270,14 @@ bool MainWindow::_HandleAppCommandMessage(BMessage *msg) {
     fLibraryController->RemoveMissingTracks();
     break;
 
+  case MSG_ADD_TO_LIBRARY:
+    fLibraryController->ShowAddToLibraryPanel();
+    break;
+
+  case MSG_ADD_TO_LIBRARY_REFS:
+    fLibraryController->AddRefsToLibrary(msg);
+    break;
+
   case B_CONTROL_INVOKED: {
     _HandleControlInvoked(msg);
     break;
@@ -678,6 +686,8 @@ void MainWindow::_BuildUI() {
   fMenuBar->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
 
   BMenu *fileMenu = new BMenu(B_TRANSLATE("File"));
+  fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Add to Library" B_UTF8_ELLIPSIS),
+                                  new BMessage(MSG_ADD_TO_LIBRARY)));
   fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Manage Music Folders"),
                                   new BMessage(MSG_MANAGE_DIRECTORIES)));
   fileMenu->AddItem(

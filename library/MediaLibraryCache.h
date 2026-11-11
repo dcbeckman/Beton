@@ -101,6 +101,11 @@ public:
    */
   static bool IsInTrash(const BString &path);
 
+  /** @brief True if @p path has an extension the library plays. */
+  static bool IsAudioFile(const BString &path) {
+    return _IsSupportedAudioFile(path);
+  }
+
   /**
    * @brief Loads configured source directories into `outDirs`.
    * @param outDirs Output vector with absolute directory paths.

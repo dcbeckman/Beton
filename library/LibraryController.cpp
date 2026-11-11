@@ -19,6 +19,7 @@
 #include <MessageRunner.h>
 #include <Entry.h>
 #include <File.h>
+#include <FilePanel.h>
 #include <FindDirectory.h>
 #include <Messenger.h>
 #include <Node.h>
@@ -38,7 +39,10 @@
 #define B_TRANSLATION_CONTEXT "LibraryController"
 
 LibraryController::LibraryController(MainWindow* window) : fWindow(window) {}
-LibraryController::~LibraryController() { _StopScanStatusTimer(); }
+LibraryController::~LibraryController() {
+  _StopScanStatusTimer();
+  delete fAddPanel;
+}
 
 /**
  * @brief Opens the directory/source management window.
@@ -246,6 +250,104 @@ void LibraryController::_RemoveFromLibrary(const std::vector<BString> &paths) {
   status.SetToFormat(B_TRANSLATE("Removed %ld tracks from the library."),
                      (long)paths.size());
   fWindow->UpdateStatus(status, false);
+}
+
+void LibraryController::ShowAddToLibraryPanel() {
+  if (fAddPanel == nullptr) {
+    fAddPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(fWindow), nullptr,
+                               B_FILE_NODE | B_DIRECTORY_NODE, true,
+                               new BMessage(MSG_ADD_TO_LIBRARY_REFS));
+    fAddPanel->Window()->SetTitle(B_TRANSLATE("Beton: Add to Library"));
+    fAddPanel->SetButtonLabel(B_DEFAULT_BUTTON, B_TRANSLATE("Add"));
+  }
+  fAddPanel->Show();
+}
+
+namespace {
+
+struct AddToLibraryJob {
+  std::vector<entry_ref> refs;
+  BMessenger cache;
+  BMessenger window;
+};
+
+/** Adds the audio files at or under @p ref to @p out. */
+void CollectAudioFiles(const entry_ref &ref, std::set<BString> &out,
+                       std::set<node_ref> &visitedDirs) {
+  BEntry entry(&ref, true);
+  BPath path;
+  if (entry.InitCheck() != B_OK || entry.GetPath(&path) != B_OK)
+    return;
+  if (!entry.IsDirectory()) {
+    if (MediaLibraryCache::IsAudioFile(path.Path()))
+      out.insert(path.Path());
+    return;
+  }
+  // Links are followed, so remember folders to stop at a loop.
+  node_ref dirRef;
+  if (entry.GetNodeRef(&dirRef) != B_OK || !visitedDirs.insert(dirRef).second)
+    return;
+  BDirectory dir(&entry);
+  entry_ref child;
+  while (dir.GetNextRef(&child) == B_OK) {
+    if (child.name != nullptr && child.name[0] == '.')
+      continue;
+    CollectAudioFiles(child, out, visitedDirs);
+  }
+}
+
+} // namespace
+
+void LibraryController::AddRefsToLibrary(const BMessage *msg) {
+  if (!fWindow->fMediaLibraryCache)
+    return;
+  auto *job = new AddToLibraryJob;
+  entry_ref ref;
+  for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; i++)
+    job->refs.push_back(ref);
+  if (job->refs.empty()) {
+    delete job;
+    return;
+  }
+  job->cache = BMessenger(fWindow->fMediaLibraryCache);
+  job->window = BMessenger(fWindow);
+  thread_id thread = spawn_thread(_AddToLibraryThread, "add to library",
+                                  B_LOW_PRIORITY, job);
+  if (thread < B_OK || resume_thread(thread) != B_OK) {
+    delete job;
+    return;
+  }
+  fWindow->UpdateStatus(B_TRANSLATE("Looking for music to add..."), false);
+}
+
+status_t LibraryController::_AddToLibraryThread(void *data) {
+  std::unique_ptr<AddToLibraryJob> job(static_cast<AddToLibraryJob *>(data));
+  std::set<BString> paths;
+  std::set<node_ref> visited;
+  for (const entry_ref &ref : job->refs)
+    CollectAudioFiles(ref, paths, visited);
+
+  // The cache skips files it already has, and its scan reports how many
+  // were new when it is done.
+  BMessage scan(MSG_SCAN_FILES);
+  for (const BString &path : paths) {
+    scan.AddString("path", path);
+    scan.AddInt32("playlist", -1); // Not from a playlist.
+  }
+  DEBUG_PRINT("Add to Library: %zu audio files found\n", paths.size());
+
+  BMessage status(MSG_STATUS_UPDATE);
+  BString text;
+  if (paths.empty())
+    text = B_TRANSLATE("No music files found to add.");
+  else
+    text.SetToFormat(B_TRANSLATE("Adding %ld files to the library..."),
+                     (long)paths.size());
+  status.AddString("text", text);
+  job->window.SendMessage(&status);
+  if (!paths.empty())
+    job->cache.SendMessage(&scan);
+  return B_OK;
 }
 
 namespace {

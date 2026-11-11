@@ -236,6 +236,8 @@
 #define MSG_CD_RIP_IMPORT 'cdrI'     ///< Rip window -> MainWindow: add ripped "path"s to the library; "folder" (the save folder) becomes a library folder if none holds them.
 #define MSG_SIDEBAR_FOLDERS 'sbFL'   ///< Sidebar folders changed (to MainWindow); their "path"s (MainWindow -> cache).
 #define MSG_LIBRARY_REMOVE 'lbRm'    ///< Remove from Library: selection (menu -> view), or "path"s (MainWindow -> cache).
+#define MSG_ADD_TO_LIBRARY 'lbAD'    ///< File menu: open the Add to Library panel.
+#define MSG_ADD_TO_LIBRARY_REFS 'lbAR' ///< Add "refs" (files, folders searched recursively) to the library.
 #define MSG_REMOVE_MISSING 'lbRM'    ///< File menu: remove tracks whose files are gone.
 #define MSG_CD_RESCAN 'cdrR'         ///< Debounced: CD volumes or their files were renamed.
 #define MSG_CD_RIP_PLAY 'cdrY'       ///< Rip window -> MainWindow: play ripped files ("path", "title", "artist", "album", "track", "duration" each; "index" to start at).

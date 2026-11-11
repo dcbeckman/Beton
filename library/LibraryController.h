@@ -8,6 +8,8 @@
 #include <atomic>
 #include <vector>
 
+class BFilePanel;
+
 class MainWindow;
 
 /**
@@ -68,6 +70,15 @@ public:
 
   /** @brief Removes tracks whose files are gone, after asking. */
   void RemoveMissingTracks();
+
+  /** @brief Opens the File > Add to Library panel. */
+  void ShowAddToLibraryPanel();
+
+  /**
+   * @brief Adds the files in @p msg's "refs" to the library; folders are
+   *        searched with their subfolders, on a background thread.
+   */
+  void AddRefsToLibrary(const BMessage *msg);
 
   /**
    * @brief Measures the loudness of the selected files on a background
@@ -180,6 +191,9 @@ public:
   void RebuildPathIndex();
 
 private:
+  static status_t _AddToLibraryThread(void *data);
+  BFilePanel *fAddPanel = nullptr;
+
   std::vector<BString> _SidebarFolders() const;
   void _RemoveFromLibrary(const std::vector<BString> &paths);
 
