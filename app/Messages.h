@@ -234,6 +234,9 @@
 #define MSG_CD_RIP_TRACK_DONE 'cdrT' ///< Ripper -> window: "track", "status", "path", "error".
 #define MSG_CD_RIP_FINISHED 'cdrF'   ///< Ripper -> window: counts, "cancelled", "path" per file.
 #define MSG_CD_RIP_IMPORT 'cdrI'     ///< Rip window -> MainWindow: add ripped "path"s to the library; "folder" (the save folder) becomes a library folder if none holds them.
+#define MSG_SIDEBAR_FOLDERS 'sbFL'   ///< Sidebar folders changed (to MainWindow); their "path"s (MainWindow -> cache).
+#define MSG_LIBRARY_REMOVE 'lbRm'    ///< Remove from Library: selection (menu -> view), or "path"s (MainWindow -> cache).
+#define MSG_REMOVE_MISSING 'lbRM'    ///< File menu: remove tracks whose files are gone.
 #define MSG_CD_RESCAN 'cdrR'         ///< Debounced: CD volumes or their files were renamed.
 #define MSG_CD_RIP_PLAY 'cdrY'       ///< Rip window -> MainWindow: play ripped files ("path", "title", "artist", "album", "track", "duration" each; "index" to start at).
 #define MSG_CD_RIP_STATUS 'cdrS'     ///< Ripper -> window: "text" for a step before ripping.

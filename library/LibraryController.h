@@ -6,6 +6,7 @@
 #include <String.h>
 
 #include <atomic>
+#include <vector>
 
 class MainWindow;
 
@@ -54,10 +55,19 @@ public:
 
   /**
    * @brief Adds files the CD ripper just wrote to the library.
-   * @param msg MSG_CD_RIP_IMPORT with one "path" per file. Only files inside
-   *        a library folder are added; the rest are left alone.
+   * @param msg MSG_CD_RIP_IMPORT with one "path" per file.
    */
   void ImportRippedFiles(BMessage* msg);
+
+  /**
+   * @brief Removes the selected tracks from the library (and playlists),
+   *        after asking. Tracks in sidebar folders are skipped: they leave
+   *        the library when their files leave the folder.
+   */
+  void RemoveSelectedFromLibrary();
+
+  /** @brief Removes tracks whose files are gone, after asking. */
+  void RemoveMissingTracks();
 
   /**
    * @brief Measures the loudness of the selected files on a background
@@ -170,6 +180,9 @@ public:
   void RebuildPathIndex();
 
 private:
+  std::vector<BString> _SidebarFolders() const;
+  void _RemoveFromLibrary(const std::vector<BString> &paths);
+
   /** True while an AnalyzeLoudness() thread is running. */
   std::atomic<bool> fLoudnessRunning{false};
 

@@ -4,7 +4,6 @@
 #include "MetadataPropertiesWindow.h"
 #include "LibraryBrowserController.h"
 #include "MusicSourceManagerWindow.h"
-#include "MusicSourceSettings.h"
 #include "MediaLibraryCache.h"
 #include "Debug.h"
 #include "Messages.h"
@@ -72,9 +71,6 @@ static bool _IsTrashDirectory(const BDirectory &dir) {
   return trash.GetNodeRef(&trashRef) == B_OK && trashRef == dirRef;
 }
 
-/**
- * @brief Moves a file on disk and updates library state on success.
- */
 namespace {
 
 bool IsInside(const BString &path, const std::vector<BString> &dirs) {
@@ -82,37 +78,10 @@ bool IsInside(const BString &path, const std::vector<BString> &dirs) {
     BString prefix(dir);
     if (!prefix.EndsWith("/"))
       prefix << "/";
-    if (path.StartsWith(prefix))
+    if (path == dir || path.StartsWith(prefix))
       return true;
   }
   return false;
-}
-
-/** Adds @p folder to the library's folders (directories.settings), keeping
- *  the ones already there. */
-bool AddLibraryFolder(const BString &folder) {
-  BPath path;
-  if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
-    return false;
-  path.Append("Beton");
-  create_directory(path.Path(), 0755);
-  path.Append("directories.settings");
-
-  BMessage archive;
-  {
-    BFile in(path.Path(), B_READ_ONLY);
-    if (in.InitCheck() == B_OK && archive.Unflatten(&in) != B_OK)
-      return false; // Unreadable: don't overwrite what we can't keep.
-  }
-  BMessage source;
-  MusicSourceSettings(folder).SaveTo(&source);
-  archive.AddMessage("source", &source);
-
-  BFile out(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
-  if (out.InitCheck() != B_OK || archive.Flatten(&out) != B_OK)
-    return false;
-  MusicSourceSettings::InvalidateCache();
-  return true;
 }
 
 } // namespace
@@ -121,37 +90,10 @@ void LibraryController::ImportRippedFiles(BMessage *msg) {
   if (!fWindow->fMediaLibraryCache)
     return;
 
-  std::vector<BString> dirs;
-  MediaLibraryCache::LoadDirectories(dirs);
-
-  // Files outside every library folder would be dropped again by the next
-  // full scan, so the save folder joins the library first.
-  BString folder;
-  bool outside = false;
-  BString path;
-  for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++)
-    outside = outside || !IsInside(path, dirs);
-  if (outside && msg->FindString("folder", &folder) == B_OK &&
-      !folder.IsEmpty()) {
-    if (AddLibraryFolder(folder)) {
-      DEBUG_PRINT("CD rip: added %s to the library folders\n",
-                  folder.String());
-      dirs.push_back(folder);
-      BString text;
-      text.SetToFormat(B_TRANSLATE("Added %s to the library folders."),
-                       folder.String());
-      fWindow->UpdateStatus(text, false);
-    } else {
-      DEBUG_PRINT("CD rip: could not add %s to the library folders\n",
-                  folder.String());
-    }
-  }
-
   BMessage scan(MSG_SCAN_FILES);
   int32 queued = 0;
+  BString path;
   for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
-    if (!IsInside(path, dirs))
-      continue;
     scan.AddString("path", path);
     scan.AddInt32("playlist", -1); // Not from a playlist.
     queued++;
@@ -161,6 +103,149 @@ void LibraryController::ImportRippedFiles(BMessage *msg) {
               (long)queued);
   if (queued > 0)
     BMessenger(fWindow->fMediaLibraryCache).SendMessage(&scan);
+}
+
+std::vector<BString> LibraryController::_SidebarFolders() const {
+  return fWindow->fPlaylistLibrary ? fWindow->fPlaylistLibrary->FolderSourcePaths()
+                                   : std::vector<BString>();
+}
+
+void LibraryController::RemoveSelectedFromLibrary() {
+  MediaTableView *cv = fWindow->fLibraryManager
+                           ? fWindow->fLibraryManager->ContentView()
+                           : nullptr;
+  if (!cv || fWindow->fIsCDMode || fWindow->fIsRadioMode ||
+      fWindow->fIsDlnaMode)
+    return;
+
+  // A sidebar folder's tracks mirror the folder: they leave the library when
+  // their files leave the folder, not by hand.
+  const std::vector<BString> folders = _SidebarFolders();
+  std::vector<BString> paths;
+  int32 inFolders = 0;
+  for (BRow *row = cv->CurrentSelection(); row; row = cv->CurrentSelection(row)) {
+    const MediaItem *mi = cv->ItemAt(cv->IndexOf(row));
+    if (!mi || mi->path.IsEmpty())
+      continue;
+    if (IsInside(mi->path, folders))
+      inFolders++;
+    else
+      paths.push_back(mi->path);
+  }
+
+  if (paths.empty()) {
+    if (inFolders > 0)
+      (new BAlert(B_TRANSLATE("Remove from Library"),
+                  B_TRANSLATE("These tracks are in a sidebar folder, so they "
+                              "stay in the library as long as their files are "
+                              "in the folder. Move the files out of the folder "
+                              "or to the Trash to remove them."),
+                  B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+                  B_INFO_ALERT))
+          ->Go(nullptr);
+    return;
+  }
+
+  BString text;
+  if (paths.size() == 1)
+    text = B_TRANSLATE("Remove this track from the library?");
+  else
+    text.SetToFormat(B_TRANSLATE("Remove %ld tracks from the library?"),
+                     (long)paths.size());
+  text << "\n\n"
+       << B_TRANSLATE("The files stay where they are. The tracks are also "
+                      "taken out of your playlists.");
+  if (inFolders > 0) {
+    BString skipped;
+    skipped.SetToFormat(B_TRANSLATE("%ld selected tracks are in sidebar "
+                                    "folders and stay."),
+                        (long)inFolders);
+    text << "\n\n" << skipped;
+  }
+  BAlert *alert = new BAlert(B_TRANSLATE("Remove from Library"), text.String(),
+                             B_TRANSLATE("Cancel"), B_TRANSLATE("Remove"),
+                             nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+  alert->SetShortcut(0, B_ESCAPE);
+  if (alert->Go() != 1)
+    return;
+
+  _RemoveFromLibrary(paths);
+}
+
+void LibraryController::RemoveMissingTracks() {
+  // Missing tracks inside sidebar folders are on a disk that isn't mounted
+  // (gone files there leave the library on their own): keep them.
+  const std::vector<BString> folders = _SidebarFolders();
+  std::vector<BString> paths;
+  for (const MediaItem &item : fWindow->fAllItems)
+    if (item.missing && !IsInside(item.path, folders))
+      paths.push_back(item.path);
+
+  if (paths.empty()) {
+    (new BAlert(B_TRANSLATE("Remove Missing Tracks"),
+                B_TRANSLATE("Every track in the library has its file."),
+                B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+                B_INFO_ALERT))
+        ->Go(nullptr);
+    return;
+  }
+
+  BString text;
+  if (paths.size() == 1)
+    text = B_TRANSLATE("1 track's file can't be found. Remove it from the "
+                       "library?");
+  else
+    text.SetToFormat(B_TRANSLATE("%ld tracks' files can't be found. Remove "
+                                 "them from the library?"),
+                     (long)paths.size());
+  text << "\n\n"
+       << B_TRANSLATE("They are also taken out of your playlists.");
+  BAlert *alert = new BAlert(B_TRANSLATE("Remove Missing Tracks"),
+                             text.String(), B_TRANSLATE("Cancel"),
+                             B_TRANSLATE("Remove"), nullptr, B_WIDTH_AS_USUAL,
+                             B_WARNING_ALERT);
+  alert->SetShortcut(0, B_ESCAPE);
+  if (alert->Go() != 1)
+    return;
+
+  _RemoveFromLibrary(paths);
+}
+
+void LibraryController::_RemoveFromLibrary(const std::vector<BString> &paths) {
+  // Playlist tracks are library tracks: leaving one would bring the track
+  // back at the next library rebuild.
+  if (fWindow->fPlaylistLibrary) {
+    std::set<BString> gone(paths.begin(), paths.end());
+    BMessage names;
+    fWindow->fPlaylistLibrary->GetPlaylistNames(names, true);
+    BString name;
+    for (int32 i = 0; names.FindString("name", i, &name) == B_OK; ++i) {
+      std::vector<BString> entries =
+          fWindow->fPlaylistLibrary->LoadPlaylist(name);
+      const size_t before = entries.size();
+      entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                   [&gone](const BString &p) {
+                                     return gone.count(p) > 0;
+                                   }),
+                    entries.end());
+      if (entries.size() != before)
+        fWindow->fPlaylistLibrary->SavePlaylist(name, entries);
+    }
+  }
+
+  // The cache answers with MSG_MEDIA_ITEM_REMOVED for each track, which takes
+  // it out of the window's list and the view.
+  if (fWindow->fMediaLibraryCache) {
+    BMessage remove(MSG_LIBRARY_REMOVE);
+    for (const BString &path : paths)
+      remove.AddString("path", path);
+    BMessenger(fWindow->fMediaLibraryCache).SendMessage(&remove);
+  }
+
+  BString status;
+  status.SetToFormat(B_TRANSLATE("Removed %ld tracks from the library."),
+                     (long)paths.size());
+  fWindow->UpdateStatus(status, false);
 }
 
 namespace {
@@ -364,6 +449,9 @@ void LibraryController::HandleLoudnessResult(BMessage *msg) {
   BMessenger(fWindow->fMediaLibraryCache).SendMessage(&update);
 }
 
+/**
+ * @brief Moves a file on disk and updates library state on success.
+ */
 void LibraryController::HandleFileMove(BMessage *msg) {
   BString from, to;
   if (msg->FindString("from", &from) != B_OK ||
@@ -412,9 +500,10 @@ void LibraryController::HandleFileMove(BMessage *msg) {
   // Keep Tracker's "Restore" working: it reads the original location from
   // _trk/original_path, so set it on the way into the Trash and clear it on
   // the way out (undo), as Tracker itself does.
+  const bool toTrash = _IsTrashDirectory(dir);
   BNode node(&entry);
   if (node.InitCheck() == B_OK) {
-    if (_IsTrashDirectory(dir)) {
+    if (toTrash) {
       BString original(originalPath.Path());
       if (node.WriteAttrString(kAttrOriginalPath, &original) != B_OK)
         DEBUG_PRINT("could not write %s on %s\n", kAttrOriginalPath,
@@ -432,7 +521,23 @@ void LibraryController::HandleFileMove(BMessage *msg) {
                                  : nullptr;
 
   auto mapIt = fWindow->fPathIndex.find(from);
-  if (mapIt != fWindow->fPathIndex.end()) {
+  if (toTrash && mapIt != fWindow->fPathIndex.end()) {
+    // A track in the Trash leaves the library. The cache keeps its entry
+    // until the next full scan, so Undo brings it back as it was.
+    fWindow->fAllItems.erase(fWindow->fAllItems.begin() + mapIt->second);
+    RebuildPathIndex();
+    if (cv && !fWindow->fIsFolderMode && !fWindow->IsPlaylistSelected()) {
+      for (int32 i = 0; i < cv->CountRows(); ++i) {
+        const MediaItem *mi = cv->ItemAt(i);
+        if (mi && mi->path == from) {
+          BRow *r = cv->RowAt(i);
+          cv->RemoveRow(r);
+          delete r;
+          break;
+        }
+      }
+    }
+  } else if (mapIt != fWindow->fPathIndex.end()) {
     size_t idx = mapIt->second;
     fWindow->fPathIndex.erase(mapIt);
     fWindow->fAllItems[idx].path = newPath;

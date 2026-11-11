@@ -258,6 +258,18 @@ bool MainWindow::_HandleAppCommandMessage(BMessage *msg) {
     break;
   }
 
+  case MSG_SIDEBAR_FOLDERS:
+    _SendSidebarFolders();
+    break;
+
+  case MSG_LIBRARY_REMOVE:
+    fLibraryController->RemoveSelectedFromLibrary();
+    break;
+
+  case MSG_REMOVE_MISSING:
+    fLibraryController->RemoveMissingTracks();
+    break;
+
   case B_CONTROL_INVOKED: {
     _HandleControlInvoked(msg);
     break;
@@ -514,6 +526,9 @@ MainWindow::MainWindow()
   RegisterWithMediaLibraryCache();
 
   LoadSettings();
+  // Before any scan the window asks for: the cache needs the sidebar's
+  // folders to tell their tracks from the rest.
+  _SendSidebarFolders();
 
   BMessage msg(MSG_INIT_LIBRARY);
   PostMessage(&msg);
@@ -667,6 +682,9 @@ void MainWindow::_BuildUI() {
                                   new BMessage(MSG_MANAGE_DIRECTORIES)));
   fileMenu->AddItem(
       new BMenuItem(B_TRANSLATE("Rescan"), new BMessage(MSG_RESCAN_FULL)));
+
+  fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Remove Missing Tracks"),
+                                  new BMessage(MSG_REMOVE_MISSING)));
 
   fileMenu->AddItem(new BMenuItem(B_TRANSLATE("Synchronize Metadata"),
                                   new BMessage(MSG_SYNC_SMART)));
@@ -1499,6 +1517,15 @@ void MainWindow::ApplyColors() {
   if (fPlaylistLibrary && fPlaylistLibrary->View()) {
     fPlaylistLibrary->View()->SetSelectionColor(selColor);
   }
+}
+
+void MainWindow::_SendSidebarFolders() {
+  if (!fMediaLibraryCache || !fPlaylistLibrary)
+    return;
+  BMessage folders(MSG_SIDEBAR_FOLDERS);
+  for (const BString &path : fPlaylistLibrary->FolderSourcePaths())
+    folders.AddString("path", path);
+  BMessenger(fMediaLibraryCache).SendMessage(&folders);
 }
 
 void MainWindow::_InitCDVolumeMonitoring() {

@@ -94,6 +94,14 @@ public:
   std::vector<MediaItem> AllEntries() const;
 
   /**
+   * @brief True if @p path lies in the Trash of any mounted volume.
+   *
+   * Tracks moved to the Trash leave the library; the cache keeps their entry
+   * until the next full scan so that Undo can bring them back.
+   */
+  static bool IsInTrash(const BString &path);
+
+  /**
    * @brief Loads configured source directories into `outDirs`.
    * @param outDirs Output vector with absolute directory paths.
    *
@@ -209,6 +217,9 @@ private:
   ///@{
   /** @brief Path-indexed media entries (`key == MediaItem::path`). */
   std::map<BString, MediaItem> fEntries;
+  /** The sidebar's folders. Their tracks mirror the folder: a file gone from
+   *  one leaves the library, where other tracks are only marked missing. */
+  std::vector<BString> fSidebarFolders;
   /** @brief UI/update target messenger (usually `MainWindow`). */
   BMessenger fTarget;
   /** @brief Absolute path of the on-disk cache file. */

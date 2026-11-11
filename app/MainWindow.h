@@ -186,6 +186,8 @@ private:
 #if ENABLE_DLNA_OUTPUT
   void _SetOutputMenuVisible(bool visible);
 #endif
+  /** Sends the sidebar's folders to the library cache. */
+  void _SendSidebarFolders();
   void _InitCDVolumeMonitoring();
   void _CheckMountedCDs();
   /** Rescans CDs shortly after a rename, once the renames settle. */

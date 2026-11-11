@@ -1,5 +1,6 @@
 #include "PlaylistLibrary.h"
 #include "Debug.h"
+#include "Messages.h"
 #include "PlaylistSidebarView.h"
 #include <Directory.h>
 #include <Entry.h>
@@ -183,6 +184,7 @@ int32 PlaylistLibrary::AddFolderSource(const BString &path,
   }
 
   fFolderSources.push_back({uniqueLabel, path});
+  _FolderSourcesChanged();
   return fPlaylistView->AddItem(uniqueLabel.String(), path.String(), false,
                                 PlaylistItemKind::Folder);
 }
@@ -191,6 +193,7 @@ bool PlaylistLibrary::RemoveFolderSource(const BString &name) {
   for (auto it = fFolderSources.begin(); it != fFolderSources.end(); ++it) {
     if (it->label == name) {
       fFolderSources.erase(it);
+      _FolderSourcesChanged();
       return true;
     }
   }
@@ -217,6 +220,17 @@ BString PlaylistLibrary::FolderPathForName(const BString &name) const {
       return source.path;
   }
   return "";
+}
+
+std::vector<BString> PlaylistLibrary::FolderSourcePaths() const {
+  std::vector<BString> paths;
+  for (const auto &source : fFolderSources)
+    paths.push_back(source.path);
+  return paths;
+}
+
+void PlaylistLibrary::_FolderSourcesChanged() {
+  fTarget.SendMessage(MSG_SIDEBAR_FOLDERS);
 }
 
 bool PlaylistLibrary::IsFolderSource(const BString &name) const {
@@ -248,6 +262,7 @@ void PlaylistLibrary::LoadFolderSources(const BMessage &in) {
                               path});
     item.MakeEmpty();
   }
+  _FolderSourcesChanged();
 }
 
 void PlaylistLibrary::GetPlaylistNames(BMessage &out, bool onlyWritable) const {

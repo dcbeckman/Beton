@@ -13,6 +13,8 @@
 #include <Node.h>
 #include <OS.h>
 #include <Path.h>
+#include <Volume.h>
+#include <VolumeRoster.h>
 #include <algorithm>
 #include <set>
 #include <stdio.h>
@@ -337,6 +339,39 @@ MediaLibraryCache::~MediaLibraryCache() {
  * legacy 'directories.txt'.
  * @param outDirs Vector to populate with directory paths.
  */
+namespace {
+
+/** The Trash folder of every mounted volume. */
+std::vector<BString> TrashFolders() {
+  std::vector<BString> out;
+  BVolumeRoster roster;
+  BVolume volume;
+  while (roster.GetNextVolume(&volume) == B_OK) {
+    BPath trash;
+    if (find_directory(B_TRASH_DIRECTORY, &trash, false, &volume) == B_OK)
+      out.push_back(trash.Path());
+  }
+  return out;
+}
+
+bool IsUnder(const BString &path, const BString &dir) {
+  if (path == dir)
+    return true;
+  BString prefix(dir);
+  if (!prefix.EndsWith("/"))
+    prefix << "/";
+  return path.StartsWith(prefix);
+}
+
+bool IsUnderAny(const BString &path, const std::vector<BString> &dirs) {
+  for (const BString &dir : dirs)
+    if (IsUnder(path, dir))
+      return true;
+  return false;
+}
+
+} // namespace
+
 void MediaLibraryCache::LoadDirectories(std::vector<BString> &outDirs) {
   BPath p;
   if (find_directory(B_USER_SETTINGS_DIRECTORY, &p) != B_OK)
@@ -426,33 +461,17 @@ void MediaLibraryCache::StartScan() {
   }
   fRescanPending = false;
 
+  // Folders to scan for new files. The settings file can lag behind the
+  // sidebar, so the window's own list is added in.
   std::vector<BString> dirs;
   LoadDirectories(dirs);
+  for (const BString &folder : fSidebarFolders)
+    if (std::find(dirs.begin(), dirs.end(), folder) == dirs.end())
+      dirs.push_back(folder);
 
-  // 1) Remove entries that belong to directories no longer monitored.
-  for (auto it = fEntries.begin(); it != fEntries.end();) {
-    const MediaItem &e = it->second;
-    bool isUnderMonitored = false;
-    for (const auto &dir : dirs) {
-      if (e.base == dir) {
-        isUnderMonitored = true;
-        break;
-      }
-      BString prefix = dir;
-      if (!prefix.EndsWith("/"))
-        prefix << "/";
-      if (e.base.StartsWith(prefix)) {
-        isUnderMonitored = true;
-        break;
-      }
-    }
-    if (!isUnderMonitored) {
-      it = fEntries.erase(it);
-      fCacheDirty = true;
-    } else {
-      ++it;
-    }
-  }
+  // 1) Tracks are no longer dropped for lying outside these folders: the
+  //    library is every track added to it (folders, playlists, rips), and
+  //    only Remove from Library takes one out.
 
   // Notify UI that scan starts from current known state.
   if (fTarget.IsValid()) {
@@ -500,7 +519,10 @@ void MediaLibraryCache::StartScan() {
     fActiveScanners++;
   }
 
-  // 3) Remove stale files from reachable sources.
+  // 3) Files that are gone. In a sidebar folder the track goes with the file;
+  //    elsewhere it stays, marked missing, until Remove Missing Tracks. Tracks
+  //    moved to the Trash go now (their entry was kept for Undo).
+  const std::vector<BString> trash = TrashFolders();
   for (auto it = fEntries.begin(); it != fEntries.end();) {
     const BString path = it->first;
     bool wasMissing = it->second.missing;
@@ -520,8 +542,19 @@ void MediaLibraryCache::StartScan() {
     }
 
     BEntry e(path.String());
-    if (!e.Exists()) {
-      DEBUG_PRINT("Remove missing file: %s\n", path.String());
+    const bool inTrash = IsUnderAny(path, trash);
+    if (!e.Exists() && !inTrash && !IsUnderAny(path, fSidebarFolders)) {
+      if (!wasMissing) {
+        DEBUG_PRINT("Missing file: %s\n", path.String());
+        it->second.missing = true;
+        fCacheDirty = true;
+      }
+      ++it;
+      continue;
+    }
+    if (!e.Exists() || inTrash) {
+      DEBUG_PRINT("Remove %s file: %s\n", inTrash ? "trashed" : "missing",
+                  path.String());
 
       if (fTarget.IsValid()) {
         BMessage gone(MSG_MEDIA_ITEM_REMOVED);
@@ -1022,12 +1055,18 @@ void MediaLibraryCache::_DiscardCorruptCache() {
  * @brief Returns a copy of all current media items.
  * @return std::vector<MediaItem>
  */
+bool MediaLibraryCache::IsInTrash(const BString &path) {
+  return IsUnderAny(path, TrashFolders());
+}
+
 std::vector<MediaItem> MediaLibraryCache::AllEntries() const {
   std::vector<MediaItem> out;
   out.reserve(fEntries.size());
 
+  const std::vector<BString> trash = TrashFolders();
   for (const auto &kv : fEntries) {
-    out.push_back(kv.second);
+    if (!IsUnderAny(kv.first, trash))
+      out.push_back(kv.second);
   }
   return out;
 }
@@ -1202,12 +1241,52 @@ void MediaLibraryCache::MessageReceived(BMessage *msg) {
     MediaItem e = it->second;
     fEntries.erase(it);
     e.path = to;
+    e.missing = false;
     fEntries[e.path] = e;
 
     DEBUG_PRINT("File moved in cache: %s -> %s\n", from.String(),
                 to.String());
     SaveCache();
     fCacheDirty = false;
+
+    // Back out of the Trash (Undo): the window dropped the track when it
+    // went in, so have it reload the library.
+    const std::vector<BString> trash = TrashFolders();
+    if (IsUnderAny(from, trash) && !IsUnderAny(to, trash) &&
+        fTarget.IsValid())
+      fTarget.SendMessage(MSG_CACHE_LOADED);
+    break;
+  }
+
+  case MSG_SIDEBAR_FOLDERS: {
+    fSidebarFolders.clear();
+    BString path;
+    for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++)
+      fSidebarFolders.push_back(path);
+    DEBUG_PRINT("%zu sidebar folders\n", fSidebarFolders.size());
+    break;
+  }
+
+  case MSG_LIBRARY_REMOVE: {
+    BString path;
+    int32 removed = 0;
+    for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
+      auto it = fEntries.find(path);
+      if (it == fEntries.end())
+        continue;
+      fEntries.erase(it);
+      removed++;
+      if (fTarget.IsValid()) {
+        BMessage gone(MSG_MEDIA_ITEM_REMOVED);
+        gone.AddString("path", path);
+        fTarget.SendMessage(&gone);
+      }
+    }
+    DEBUG_PRINT("Removed %ld tracks from the library\n", (long)removed);
+    if (removed > 0) {
+      fCacheDirty = true;
+      _ScheduleSave();
+    }
     break;
   }
 

@@ -605,6 +605,17 @@ private:
 };
 
 /**
+ * Text color for a track whose file is missing: the row's own text color
+ * pulled halfway toward its background. A fixed tint of the panel color
+ * (what this was) all but vanished on the list's background.
+ */
+static rgb_color MissingTextColor(BView *parent) {
+  const rgb_color text = parent->HighColor();
+  const rgb_color back = parent->LowColor();
+  return mix_color(text, back, 110);
+}
+
+/**
  * @class StatusStringColumn
  * @brief Column that renders text in gray if the file is missing,
  *        and bold if the row is currently playing.
@@ -662,8 +673,7 @@ public:
         }
       }
     } else if (isGray) {
-      parent->SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR),
-                                      B_DISABLED_LABEL_TINT));
+      parent->SetHighColor(MissingTextColor(parent));
     }
 
     if (field)
@@ -760,8 +770,7 @@ public:
         }
       }
     } else if (isGray) {
-      parent->SetHighColor(tint_color(ui_color(B_PANEL_BACKGROUND_COLOR),
-                                      B_DISABLED_LABEL_TINT));
+      parent->SetHighColor(MissingTextColor(parent));
     }
 
     if (field)
@@ -2004,6 +2013,14 @@ void MediaTableView::MessageReceived(BMessage *msg) {
       }
 
       menu.AddSeparatorItem();
+      {
+        // Audio CD tracks aren't library tracks.
+        auto *mw = dynamic_cast<MainWindow *>(Window());
+        BMenuItem *item = new BMenuItem(B_TRANSLATE("Remove from Library"),
+                                        new BMessage(MSG_LIBRARY_REMOVE));
+        item->SetEnabled(mw == nullptr || !mw->IsCDMode());
+        menu.AddItem(item);
+      }
       menu.AddItem(new BMenuItem(B_TRANSLATE("Move File To..."),
                                  new BMessage(MSG_MOVE_TO)));
       menu.AddItem(new BMenuItem(B_TRANSLATE("Move File To Trash"),
