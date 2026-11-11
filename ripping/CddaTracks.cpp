@@ -1,5 +1,6 @@
 #include "CddaTracks.h"
 
+#include <ctype.h>
 #include <Directory.h>
 #include <Entry.h>
 #include <Node.h>
@@ -36,16 +37,36 @@ static BString DiscArtist(const BString &cdPath, const BString &album) {
   if (volume.InitCheck() != B_OK || volume.GetName(name) != B_OK)
     return BString();
 
-  // cdda swaps '/' for '-' in the volume name; compare the album the same way.
-  BString suffix(" - ");
-  suffix << album;
-  suffix.ReplaceAll('/', '-');
-  BString volumeName(name);
-  if (volumeName.Length() <= suffix.Length() || !volumeName.EndsWith(suffix))
+  // The name is "<artist> - <title>", but not always with the title exactly
+  // as the tracks carry it: Haiku's cddb_lookup turns '/' into ' ', and
+  // Gothic Box disc 2 (hrev60368) came up as "... Disc 2 of3" while its
+  // tracks say "Disc 2 of 3". So try each " - " split and compare the rest
+  // with the album ignoring spaces, punctuation and case.
+  auto normalize = [](const BString &text) {
+    BString out;
+    for (int32 i = 0; i < text.Length(); i++) {
+      const uint8 c = (uint8)text[i];
+      if (c >= 0x80 || isalnum(c))
+        out << (char)tolower(c);
+    }
+    return out;
+  };
+  const BString wanted = normalize(album);
+  if (wanted.IsEmpty())
     return BString();
-  volumeName.Truncate(volumeName.Length() - suffix.Length());
-  volumeName.Trim();
-  return volumeName;
+  const BString volumeName(name);
+  for (int32 at = volumeName.FindFirst(" - "); at > 0;
+       at = volumeName.FindFirst(" - ", at + 1)) {
+    BString rest;
+    volumeName.CopyInto(rest, at + 3, volumeName.Length() - at - 3);
+    if (normalize(rest) != wanted)
+      continue;
+    BString artist;
+    volumeName.CopyInto(artist, 0, at);
+    artist.Trim();
+    return artist;
+  }
+  return BString();
 }
 
 std::vector<MediaItem> CddaTracks::Read(const BString &cdPath) {
