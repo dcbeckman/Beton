@@ -215,7 +215,58 @@ void LibraryController::RemoveMissingTracks() {
   _RemoveFromLibrary(paths);
 }
 
-void LibraryController::_RemoveFromLibrary(const std::vector<BString> &paths) {
+void LibraryController::AddPlaylistTracks(const std::vector<BString> &paths) {
+  // Before the cache has loaded every track would look new; the cache's own
+  // load covers them.
+  if (!fWindow->fMediaLibraryCache || !fWindow->fCacheLoaded)
+    return;
+  BMessage scan(MSG_SCAN_FILES);
+  int32 queued = 0;
+  for (const BString &path : paths) {
+    if (path.IsEmpty() || path[0] != '/' ||
+        fWindow->fPathIndex.count(path) > 0)
+      continue;
+    scan.AddString("path", path);
+    scan.AddInt32("playlist", -1);
+    queued++;
+  }
+  if (queued == 0)
+    return;
+  DEBUG_PRINT("Adding %ld playlist tracks to the library\n", (long)queued);
+  BMessenger(fWindow->fMediaLibraryCache).SendMessage(&scan);
+}
+
+void LibraryController::RemovePathsFromLibrary(const BMessage *msg) {
+  std::vector<BString> paths;
+  BString path;
+  for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++)
+    paths.push_back(path);
+  if (!paths.empty())
+    _RemoveFromLibrary(paths, !msg->HasBool("undo_replay"));
+}
+
+void LibraryController::RestoreToLibrary(const BMessage *msg) {
+  if (!fWindow->fMediaLibraryCache)
+    return;
+  BMessage restore(*msg);
+  restore.RemoveName("undo_replay");
+  BMessenger(fWindow->fMediaLibraryCache).SendMessage(&restore);
+
+  type_code type;
+  int32 count = 0;
+  msg->GetInfo("path", &type, &count);
+  BString status;
+  status.SetToFormat(B_TRANSLATE("Put %ld tracks back in the library."),
+                     (long)count);
+  fWindow->UpdateStatus(status, false);
+}
+
+void LibraryController::_RemoveFromLibrary(const std::vector<BString> &paths,
+                                           bool recordUndo) {
+  BMessage undo(MSG_LIBRARY_RESTORE);
+  for (const BString &path : paths)
+    undo.AddString("path", path);
+
   // Playlist tracks are library tracks: leaving one would bring the track
   // back at the next library rebuild.
   if (fWindow->fPlaylistLibrary) {
@@ -226,15 +277,30 @@ void LibraryController::_RemoveFromLibrary(const std::vector<BString> &paths) {
     for (int32 i = 0; names.FindString("name", i, &name) == B_OK; ++i) {
       std::vector<BString> entries =
           fWindow->fPlaylistLibrary->LoadPlaylist(name);
-      const size_t before = entries.size();
+      const std::vector<BString> before = entries;
       entries.erase(std::remove_if(entries.begin(), entries.end(),
                                    [&gone](const BString &p) {
                                      return gone.count(p) > 0;
                                    }),
                     entries.end());
-      if (entries.size() != before)
-        fWindow->fPlaylistLibrary->SavePlaylist(name, entries);
+      if (entries.size() == before.size())
+        continue;
+      fWindow->fPlaylistLibrary->SavePlaylist(name, entries);
+
+      // Undo puts the playlist back as it was, after the tracks are back.
+      BMessage restore(MSG_RESTORE_PLAYLIST_PATHS);
+      restore.AddString("playlist", name);
+      for (const BString &p : before)
+        restore.AddString("paths", p);
+      undo.AddMessage("then", &restore);
     }
+  }
+
+  if (recordUndo && fWindow->fUndoManager) {
+    BMessage redo(MSG_LIBRARY_REMOVE);
+    for (const BString &path : paths)
+      redo.AddString("path", path);
+    fWindow->fUndoManager->RecordAction({undo}, {redo});
   }
 
   // The cache answers with MSG_MEDIA_ITEM_REMOVED for each track, which takes

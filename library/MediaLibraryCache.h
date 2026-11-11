@@ -9,6 +9,7 @@
 #include <String.h>
 #include <Query.h>
 #include <Volume.h>
+#include <deque>
 #include <map>
 #include <set>
 #include <vector>
@@ -225,6 +226,10 @@ private:
   /** The sidebar's folders. Their tracks mirror the folder: a file gone from
    *  one leaves the library, where other tracks are only marked missing. */
   std::vector<BString> fSidebarFolders;
+  /** Entries taken out by Remove from Library, newest last, so Undo can put
+   *  them back as they were (a missing track can't be rescanned). Kept for
+   *  as many removals as the undo history holds; memory only. */
+  std::deque<std::map<BString, MediaItem>> fRemovedBatches;
   /** @brief UI/update target messenger (usually `MainWindow`). */
   BMessenger fTarget;
   /** @brief Absolute path of the on-disk cache file. */

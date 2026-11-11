@@ -6,6 +6,7 @@
 #include "Debug.h"
 #include "NowPlayingInfoPanel.h"
 #include "LibraryBrowserController.h"
+#include "LibraryController.h"
 #include "MainWindow.h"
 #include "Messages.h"
 #include "MetadataTagIO.h"
@@ -277,6 +278,10 @@ void PlaylistSelectionController::ShowRegularPlaylistSource(const BString &name)
   fWindow->fLibraryManager->ContentView()->SetFolderMode(false);
   fWindow->fLibraryManager->SetRadioFilterMode(false);
   std::vector<BString> paths = fWindow->fPlaylistLibrary->LoadPlaylist(name);
+  // Tracks put in the playlist before playlists joined them to the library
+  // show only a file name: add them now.
+  if (fWindow->fLibraryController)
+    fWindow->fLibraryController->AddPlaylistTracks(paths);
   fWindow->fLibraryManager->SetActivePaths(paths);
   if (fWindow->fMediaLibraryCache) {
     BMessage watchMsg(MSG_WATCH_FOLDER);

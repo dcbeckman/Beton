@@ -239,6 +239,8 @@
 #define MSG_ADD_TO_LIBRARY 'lbAD'    ///< File menu: open the Add to Library panel.
 #define MSG_ADD_TO_LIBRARY_REFS 'lbAR' ///< Add "refs" (files, folders searched recursively) to the library.
 #define MSG_REMOVE_MISSING 'lbRM'    ///< File menu: remove tracks whose files are gone.
+#define MSG_PLAYLIST_SAVED 'plSv'    ///< A playlist was written; its "path"s join the library.
+#define MSG_LIBRARY_RESTORE 'lbRs'   ///< Undo of a removal: put the "path"s back; "then" messages go back to the window after.
 #define MSG_CD_RESCAN 'cdrR'         ///< Debounced: CD volumes or their files were renamed.
 #define MSG_CD_RIP_PLAY 'cdrY'       ///< Rip window -> MainWindow: play ripped files ("path", "title", "artist", "album", "track", "duration" each; "index" to start at).
 #define MSG_CD_RIP_STATUS 'cdrS'     ///< Ripper -> window: "text" for a step before ripping.

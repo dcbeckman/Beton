@@ -6,6 +6,7 @@
 #include "MediaLibraryScanner.h"
 #include "Messages.h"
 #include "MusicSourceSettings.h"
+#include "UndoManager.h"
 #include <Directory.h>
 #include <Entry.h>
 #include <File.h>
@@ -1270,10 +1271,12 @@ void MediaLibraryCache::MessageReceived(BMessage *msg) {
   case MSG_LIBRARY_REMOVE: {
     BString path;
     int32 removed = 0;
+    std::map<BString, MediaItem> batch;
     for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
       auto it = fEntries.find(path);
       if (it == fEntries.end())
         continue;
+      batch[path] = it->second;
       fEntries.erase(it);
       removed++;
       if (fTarget.IsValid()) {
@@ -1284,8 +1287,65 @@ void MediaLibraryCache::MessageReceived(BMessage *msg) {
     }
     DEBUG_PRINT("Removed %ld tracks from the library\n", (long)removed);
     if (removed > 0) {
+      fRemovedBatches.push_back(std::move(batch));
+      while ((int32)fRemovedBatches.size() > UndoManager::kMaxDepth)
+        fRemovedBatches.pop_front();
       fCacheDirty = true;
       _ScheduleSave();
+    }
+    break;
+  }
+
+  case MSG_LIBRARY_RESTORE: {
+    // Undo of a removal: the newest stashed copy of each path is the one that
+    // removal took out.
+    BString path;
+    int32 restored = 0;
+    std::vector<BString> unknown;
+    for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
+      if (fEntries.count(path) > 0)
+        continue; // Added back some other way since.
+      bool found = false;
+      for (auto b = fRemovedBatches.rbegin(); b != fRemovedBatches.rend();
+           ++b) {
+        auto it = b->find(path);
+        if (it == b->end())
+          continue;
+        fEntries[path] = it->second;
+        b->erase(it);
+        found = true;
+        restored++;
+        break;
+      }
+      if (!found)
+        unknown.push_back(path);
+    }
+    while (!fRemovedBatches.empty() && fRemovedBatches.front().empty())
+      fRemovedBatches.pop_front();
+    DEBUG_PRINT("Restored %ld tracks to the library (%zu rescanned)\n",
+                (long)restored, unknown.size());
+
+    // Not stashed (shouldn't happen): read the file again.
+    if (!unknown.empty()) {
+      BMessage scan(MSG_SCAN_FILES);
+      for (const BString &p : unknown) {
+        scan.AddString("path", p);
+        scan.AddInt32("playlist", -1);
+      }
+      _QueueFileScans(&scan);
+    }
+    if (restored > 0) {
+      fCacheDirty = true;
+      _ScheduleSave();
+    }
+
+    // The playlists go back once their tracks are in the library again.
+    if (fTarget.IsValid()) {
+      BMessage then;
+      for (int32 i = 0; msg->FindMessage("then", i, &then) == B_OK; i++)
+        fTarget.SendMessage(&then);
+      if (restored > 0)
+        fTarget.SendMessage(MSG_CACHE_LOADED);
     }
     break;
   }

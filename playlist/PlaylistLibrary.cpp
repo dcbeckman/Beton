@@ -152,6 +152,12 @@ void PlaylistLibrary::SavePlaylist(const BString &name,
   DEBUG_PRINT("Playlist '%s' saved (%zu entries)\n", name.String(),
               paths.size());
 
+  // Playlist tracks are library tracks: the window adds any that are new.
+  BMessage saved(MSG_PLAYLIST_SAVED);
+  for (const auto &path : paths)
+    saved.AddString("path", path);
+  fTarget.SendMessage(&saved);
+
   if (fPlaylistView->FindIndexByName(name) < 0) {
     fPlaylistView->AddItem(name, playlistPath.Path());
   }

@@ -71,6 +71,16 @@ public:
   /** @brief Removes tracks whose files are gone, after asking. */
   void RemoveMissingTracks();
 
+  /** @brief Adds a playlist's tracks that aren't in the library yet. */
+  void AddPlaylistTracks(const std::vector<BString> &paths);
+
+  /** @brief Redo of a removal: removes the "path"s without asking. */
+  void RemovePathsFromLibrary(const BMessage *msg);
+
+  /** @brief Undo of a removal: puts the "path"s back in the library, then
+   *         restores the playlists they were taken out of. */
+  void RestoreToLibrary(const BMessage *msg);
+
   /** @brief Opens the File > Add to Library panel. */
   void ShowAddToLibraryPanel();
 
@@ -195,7 +205,10 @@ private:
   BFilePanel *fAddPanel = nullptr;
 
   std::vector<BString> _SidebarFolders() const;
-  void _RemoveFromLibrary(const std::vector<BString> &paths);
+  /** Removes @p paths from the library and from playlists; @p recordUndo
+   *  adds the removal to Edit > Undo (not when replaying a Redo). */
+  void _RemoveFromLibrary(const std::vector<BString> &paths,
+                          bool recordUndo = true);
 
   /** True while an AnalyzeLoudness() thread is running. */
   std::atomic<bool> fLoudnessRunning{false};

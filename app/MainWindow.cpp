@@ -263,8 +263,25 @@ bool MainWindow::_HandleAppCommandMessage(BMessage *msg) {
     break;
 
   case MSG_LIBRARY_REMOVE:
-    fLibraryController->RemoveSelectedFromLibrary();
+    // From the menu it means the selection; Redo sends the paths.
+    if (msg->HasString("path"))
+      fLibraryController->RemovePathsFromLibrary(msg);
+    else
+      fLibraryController->RemoveSelectedFromLibrary();
     break;
+
+  case MSG_LIBRARY_RESTORE:
+    fLibraryController->RestoreToLibrary(msg);
+    break;
+
+  case MSG_PLAYLIST_SAVED: {
+    std::vector<BString> paths;
+    BString path;
+    for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++)
+      paths.push_back(path);
+    fLibraryController->AddPlaylistTracks(paths);
+    break;
+  }
 
   case MSG_REMOVE_MISSING:
     fLibraryController->RemoveMissingTracks();
