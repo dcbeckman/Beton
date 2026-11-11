@@ -1,5 +1,6 @@
 #include "AccurateRip.h"
 
+#include "CddaTracks.h"
 #include "Debug.h"
 
 #include <ByteOrder.h>
@@ -27,14 +28,8 @@ uint32 ReadLE32(const uint8 *p) {
          ((uint32)p[3] << 24);
 }
 
-struct TocEntry {
-  uint8 number;
-  bool audio;
-  uint32 lba;
-};
-
 /** The standard freedb disc ID, for discs without a CD:cddbid attribute. */
-uint32 CddbId(const std::vector<TocEntry> &tracks, uint32 leadOut) {
+uint32 CddbId(const std::vector<CddaTracks::TocTrack> &tracks, uint32 leadOut) {
   auto digitSum = [](uint32 n) {
     uint32 s = 0;
     for (; n > 0; n /= 10)
@@ -42,7 +37,7 @@ uint32 CddbId(const std::vector<TocEntry> &tracks, uint32 leadOut) {
     return s;
   };
   uint32 n = 0;
-  for (const TocEntry &t : tracks)
+  for (const CddaTracks::TocTrack &t : tracks)
     n += digitSum((t.lba + 150) / 75);
   uint32 total = (leadOut + 150) / 75 - (tracks.front().lba + 150) / 75;
   return ((n % 255) << 24) | (total << 8) | (uint32)tracks.size();
@@ -63,47 +58,30 @@ BString AccurateRip::DiscId::Url() const {
 
 status_t AccurateRip::ReadDiscId(const BString &cdPath, DiscId &out) {
   out = DiscId();
-  BNode root(cdPath.String());
-  if (root.InitCheck() != B_OK)
-    return root.InitCheck();
+  CddaTracks::Toc toc;
+  status_t status = CddaTracks::ReadToc(cdPath, toc);
+  if (status != B_OK)
+    return status;
+  const std::vector<CddaTracks::TocTrack> &tracks = toc.tracks;
+  const uint32 leadOut = toc.leadOut;
 
-  // scsi_toc_toc: 4-byte header, then 8 bytes per track with an MSF start
-  // address (cdda asks the drive for MSF). Track 0xAA is the lead-out.
-  uint8 toc[4 + 100 * 8];
-  ssize_t size = root.ReadAttr("CD:toc", B_RAW_TYPE, 0, toc, sizeof(toc));
-  if (size < 4 + 2 * 8)
-    return B_ENTRY_NOT_FOUND;
-
-  std::vector<TocEntry> tracks;
-  int64 leadOut = -1;
-  for (ssize_t i = 4; i + 8 <= size; i += 8) {
-    const uint8 *e = toc + i;
-    const uint32 lba = ((uint32)e[5] * 60 + e[6]) * 75 + e[7] - 150;
-    if (e[2] == 0xAA) {
-      leadOut = lba;
-      break;
-    }
-    tracks.push_back({e[2], (e[1] & 0x04) == 0, lba});
-  }
-  if (tracks.empty() || leadOut < 0)
-    return B_BAD_DATA;
-
-  for (const TocEntry &t : tracks) {
+  for (const CddaTracks::TocTrack &t : tracks) {
     if (!t.audio)
       continue;
     out.id1 += t.lba;
     out.id2 += (t.lba > 0 ? t.lba : 1) * t.number;
     out.audioTracks++;
   }
-  out.id1 += (uint32)leadOut;
-  out.id2 += (uint32)leadOut * (uint32)(out.audioTracks + 1);
+  out.id1 += leadOut;
+  out.id2 += leadOut * (uint32)(out.audioTracks + 1);
 
+  BNode root(cdPath.String());
   uint32 cddb = 0;
   if (root.ReadAttr("CD:cddbid", B_UINT32_TYPE, 0, &cddb, sizeof(cddb)) ==
       (ssize_t)sizeof(cddb))
     out.cddb = cddb;
   else
-    out.cddb = CddbId(tracks, (uint32)leadOut);
+    out.cddb = CddbId(tracks, leadOut);
 
   return out.IsValid() ? B_OK : B_BAD_DATA;
 }

@@ -76,6 +76,12 @@ public:
   void PlayLocalSelection(MediaTableView *view, int32 rowIndex);
 
   /**
+   * @brief Plays files that need not be in the library or the content view
+   *        (freshly ripped tracks), starting at @p index.
+   */
+  void PlayItems(const std::vector<MediaItem> &items, int32 index);
+
+  /**
    * @brief Details of a queued track that is not in the library index
    * (audio CD, folder outside the library), or nullptr.
    */

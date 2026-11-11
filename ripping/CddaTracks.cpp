@@ -176,3 +176,30 @@ std::vector<MediaItem> CddaTracks::Read(const BString &cdPath) {
 
   return cdTracks;
 }
+
+status_t CddaTracks::ReadToc(const BString &cdPath, Toc &out) {
+  out = Toc();
+  BNode root(cdPath.String());
+  if (root.InitCheck() != B_OK)
+    return root.InitCheck();
+
+  // scsi_toc_toc: 4-byte header, then 8 bytes per track with an MSF start
+  // address (cdda asks the drive for MSF). Track 0xAA is the lead-out.
+  uint8 toc[4 + 100 * 8];
+  ssize_t size = root.ReadAttr("CD:toc", B_RAW_TYPE, 0, toc, sizeof(toc));
+  if (size < 4 + 2 * 8)
+    return B_ENTRY_NOT_FOUND;
+
+  bool haveLeadOut = false;
+  for (ssize_t i = 4; i + 8 <= size; i += 8) {
+    const uint8 *e = toc + i;
+    const uint32 lba = ((uint32)e[5] * 60 + e[6]) * 75 + e[7] - 150;
+    if (e[2] == 0xAA) {
+      out.leadOut = lba;
+      haveLeadOut = true;
+      break;
+    }
+    out.tracks.push_back({e[2], (e[1] & 0x04) == 0, lba});
+  }
+  return (out.tracks.empty() || !haveLeadOut) ? B_BAD_DATA : B_OK;
+}

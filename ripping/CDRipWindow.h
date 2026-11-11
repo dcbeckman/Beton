@@ -12,6 +12,7 @@
 
 class BButton;
 class BCheckBox;
+class BColumn;
 class BColumnListView;
 class BFilePanel;
 class BMenuField;
@@ -27,9 +28,10 @@ class CDRipper;
  *        the whole disc with CDRipper and shows each track's AccurateRip
  *        result.
  *
- * Opened from the sidebar's CD row. When a rip completes, the new files are
- * sent to @p libraryTarget as MSG_CD_RIP_IMPORT so the ones inside a library
- * folder are added to the library.
+ * Opened from the sidebar's CD row. When a rip completes and "Add tracks to
+ * library" is on, the new files are sent to @p libraryTarget as
+ * MSG_CD_RIP_IMPORT to be added to the library. Double-clicking a ripped track sends the
+ * ripped files to the same target as MSG_CD_RIP_PLAY.
  */
 class CDRipWindow : public BWindow {
 public:
@@ -49,6 +51,13 @@ private:
   bool _ParseOffset(int32 &offset, bool &known) const;
   void _UpdateDriveInfo();
   void _SetTrackStatus(int32 index, const char *text);
+  /** Colors a track's row: a TrackResult from CDRipWindow.cpp. */
+  void _SetTrackResult(int32 index, int32 result);
+  bool _IsTrackChecked(int32 index) const;
+  int32 _CountCheckedTracks() const;
+  void _CheckAllTracks(bool checked);
+  /** Shows all, none or mixed in the "All tracks" box. */
+  void _UpdateAllCheck();
 
   void _UpdatePreview();
   void _ChooseFolder();
@@ -59,11 +68,15 @@ private:
   void _HandleFinished(BMessage *msg);
   void _HandleOffset(BMessage *msg);
   void _ShowOutputFolder();
+  /** Plays the ripped files, starting at the selected track. */
+  void _PlaySelectedTrack();
 
   BString fDiscPath;
   BString fDiscLabel;
   BMessenger fLibraryTarget;
   std::vector<MediaItem> fTracks;
+  std::vector<BString> fRippedPaths; ///< Per track; empty until it is ripped.
+  bigtime_t fLastToggle = 0;         ///< When a checkbox was last clicked.
   CDRipSettings fSettings;
 
   CDRipper *fRipper = nullptr;
@@ -77,9 +90,12 @@ private:
 
   BStringView *fDiscInfo = nullptr;
   BColumnListView *fTrackList = nullptr;
+  BColumn *fCheckColumn = nullptr; ///< The CheckColumn from CDRipWindow.cpp.
+  BCheckBox *fAllCheck = nullptr;
   BTextControl *fOffsetControl = nullptr;
   BStringView *fDriveInfo = nullptr;
   BCheckBox *fVerifyCheck = nullptr;
+  BCheckBox *fLibraryCheck = nullptr;
   BPopUpMenu *fFormatMenu = nullptr;
   BMenuField *fFormatField = nullptr;
   BTextControl *fFolderControl = nullptr;

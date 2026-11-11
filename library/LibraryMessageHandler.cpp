@@ -7,6 +7,7 @@
 #include "PlaylistSelectionController.h"
 #include "LibraryBrowserController.h"
 #include "MediaTableView.h"
+#include "PlaybackQueueManager.h"
 
 #include <Message.h>
 
@@ -117,6 +118,26 @@ bool LibraryMessageHandler::HandleMessage(BMessage *msg) {
 
   case MSG_CD_RIP_IMPORT: {
     fWindow->fLibraryController->ImportRippedFiles(msg);
+    break;
+  }
+
+  case MSG_CD_RIP_PLAY: {
+    std::vector<MediaItem> items;
+    BString path;
+    for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
+      MediaItem item;
+      item.path = path;
+      msg->FindString("title", i, &item.title);
+      msg->FindString("artist", i, &item.artist);
+      msg->FindString("album", i, &item.album);
+      msg->FindInt32("track", i, &item.track);
+      msg->FindInt32("duration", i, &item.duration);
+      items.push_back(item);
+    }
+    int32 index = 0;
+    msg->FindInt32("index", &index);
+    if (fWindow->fPlaybackQueueManager)
+      fWindow->fPlaybackQueueManager->PlayItems(items, index);
     break;
   }
 

@@ -46,6 +46,7 @@ void CDRipSettings::Load() {
   directory.Truncate(0);
   pattern.Truncate(0);
   verify = true;
+  addToLibrary = true;
   fDriveOffsets.MakeEmpty();
 
   BPath path;
@@ -63,6 +64,8 @@ void CDRipSettings::Load() {
       bool b;
       if (archive.FindBool("verify", &b) == B_OK)
         verify = b;
+      if (archive.FindBool("add_to_library", &b) == B_OK)
+        addToLibrary = b;
       archive.FindMessage("drive_offsets", &fDriveOffsets);
     }
   }
@@ -84,6 +87,7 @@ void CDRipSettings::Save() const {
   archive.AddString("directory", directory);
   archive.AddString("pattern", pattern);
   archive.AddBool("verify", verify);
+  archive.AddBool("add_to_library", addToLibrary);
   archive.AddMessage("drive_offsets", &fDriveOffsets);
 
   BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);

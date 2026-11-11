@@ -17,6 +17,7 @@
 #include <CheckBox.h>
 #include <ColumnListView.h>
 #include <ColumnTypes.h>
+#include <ControlLook.h>
 #include <Directory.h>
 #include <Entry.h>
 #include <FilePanel.h>
@@ -50,10 +51,140 @@ enum {
   kMsgClose = 'rcls',
   kMsgShowFolder = 'rshw',
   kMsgOffsetEdited = 'roed',
-  kMsgVerifyChanged = 'rver'
+  kMsgVerifyChanged = 'rver',
+  kMsgToggleAll = 'rtal',
+  kMsgTrackToggled = 'rttg',
+  kMsgPlayTrack = 'rply'
 };
 
-enum { kColNumber, kColTitle, kColArtist, kColLength, kColGain, kColStatus };
+/** How a finished track came out; picks its text color in the track list. */
+enum TrackResult : int32 {
+  kResultNone = 0, ///< Not ripped yet, skipped, stopped, or nothing checked.
+  kResultClean,    ///< No read errors left, but no AccurateRip match.
+  kResultVerified, ///< No read errors left and an AccurateRip match.
+  kResultBad       ///< Read errors left after re-reading, or the rip failed.
+};
+
+/** Whether a track is to be ripped. */
+class CheckField : public BField {
+public:
+  bool checked = true;
+};
+
+/**
+ * A checkbox per track. Toggles on click (unless locked during a rip) and
+ * tells the window, which keeps the "All tracks" box in step.
+ *
+ * Haiku's OutlineView looks the clicked field up by the column's display
+ * position, not its field number, so this column has to be field 0 and the
+ * list must not let columns be moved.
+ */
+class CheckColumn : public BColumn {
+public:
+  CheckColumn(float width, BMessenger target)
+      : BColumn(width, width, width, B_ALIGN_CENTER), fTarget(target) {
+    SetWantsEvents(true);
+  }
+
+  void SetLocked(bool locked) { fLocked = locked; }
+
+  void GetColumnName(BString *into) const override {
+    *into = B_TRANSLATE("Rip");
+  }
+  void DrawTitle(BRect, BView *) override {}
+
+  void DrawField(BField *field, BRect rect, BView *parent) override {
+    CheckField *f = dynamic_cast<CheckField *>(field);
+    if (f == nullptr)
+      return;
+    const float size = std::min(14.0f, rect.Height() - 4);
+    BRect box(0, 0, size, size);
+    box.OffsetTo(rect.left + floorf((rect.Width() - size) / 2),
+                 rect.top + floorf((rect.Height() - size) / 2));
+    uint32 flags = f->checked ? BControlLook::B_ACTIVATED : 0;
+    if (fLocked)
+      flags |= BControlLook::B_DISABLED;
+    be_control_look->DrawCheckBox(parent, box, box,
+                                  ui_color(B_CONTROL_BACKGROUND_COLOR), flags);
+  }
+
+  int CompareFields(BField *a, BField *b) override {
+    return (int)static_cast<CheckField *>(a)->checked -
+           (int)static_cast<CheckField *>(b)->checked;
+  }
+
+  bool AcceptsField(const BField *field) const override {
+    return dynamic_cast<const CheckField *>(field) != nullptr;
+  }
+
+  void MouseDown(BColumnListView *parent, BRow *row, BField *field, BRect,
+                 BPoint, uint32) override {
+    CheckField *f = dynamic_cast<CheckField *>(field);
+    if (fLocked || f == nullptr)
+      return;
+    f->checked = !f->checked;
+    parent->UpdateRow(row);
+    fTarget.SendMessage(kMsgTrackToggled);
+  }
+
+private:
+  BMessenger fTarget;
+  bool fLocked = false;
+};
+
+/** A track-list cell that remembers its row's result. */
+class TrackField : public BStringField {
+public:
+  explicit TrackField(const char *text) : BStringField(text) {}
+  TrackResult result = kResultNone;
+};
+
+/**
+ * Draws a cell in its row's result color. Shades depend on the list's
+ * background so they stay readable in light and dark themes.
+ */
+class TrackColumn : public BStringColumn {
+public:
+  using BStringColumn::BStringColumn;
+
+  void DrawField(BField *field, BRect rect, BView *parent) override {
+    TrackField *f = dynamic_cast<TrackField *>(field);
+    if (f == nullptr || f->result == kResultNone) {
+      BStringColumn::DrawField(field, rect, parent);
+      return;
+    }
+    const rgb_color bg = ui_color(B_LIST_BACKGROUND_COLOR);
+    const bool dark = bg.red * 0.299f + bg.green * 0.587f + bg.blue * 0.114f < 128;
+    rgb_color color;
+    switch (f->result) {
+    case kResultVerified:
+      color = dark ? make_color(80, 235, 80) : make_color(0, 140, 0);
+      break;
+    case kResultClean:
+      color = dark ? make_color(165, 205, 165) : make_color(90, 140, 90);
+      break;
+    default:
+      color = dark ? make_color(255, 95, 95) : make_color(200, 0, 0);
+      break;
+    }
+    const rgb_color old = parent->HighColor();
+    parent->SetHighColor(color);
+    BStringColumn::DrawField(field, rect, parent);
+    parent->SetHighColor(old);
+  }
+};
+
+
+enum {
+  kColCheck, // Must stay field 0: see CheckColumn.
+  kColNumber,
+  kColTitle,
+  kColArtist,
+  kColLength,
+  kColGain,
+  kColErrors,
+  kColStatus
+};
 
 const float kProgressMax = 1000.0f;
 
@@ -89,7 +220,7 @@ BString FormatDuration(int32 seconds) {
 
 CDRipWindow::CDRipWindow(const BString &discPath, const BString &discLabel,
                          BMessenger libraryTarget)
-    : BWindow(BRect(0, 0, 700, 300), B_TRANSLATE("Rip audio CD"),
+    : BWindow(BRect(0, 0, 800, 300), B_TRANSLATE("Rip audio CD"),
               B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS |
                   B_ASYNCHRONOUS_CONTROLS | B_CLOSE_ON_ESCAPE),
@@ -103,8 +234,8 @@ CDRipWindow::CDRipWindow(const BString &discPath, const BString &discLabel,
   _UpdatePreview();
 
   ResizeToPreferred();
-  if (Bounds().Width() < 700)
-    ResizeTo(700, Bounds().Height());
+  if (Bounds().Width() < 800)
+    ResizeTo(800, Bounds().Height());
   CenterOnScreen();
 }
 
@@ -157,34 +288,51 @@ void CDRipWindow::_BuildUI() {
   fTrackList->SetColor(B_COLOR_HEADER_BACKGROUND,
                        ui_color(B_PANEL_BACKGROUND_COLOR));
   fTrackList->SetColor(B_COLOR_HEADER_TEXT, ui_color(B_PANEL_TEXT_COLOR));
-  fTrackList->AddColumn(new BStringColumn("#", 30, 26, 50, B_TRUNCATE_END,
+  // Resizing only: moving columns would break the checkbox column's clicks.
+  fTrackList->SetColumnFlags(B_ALLOW_COLUMN_RESIZE);
+  fCheckColumn = new CheckColumn(24, BMessenger(this));
+  fTrackList->AddColumn(fCheckColumn, kColCheck);
+  fTrackList->AddColumn(new TrackColumn("#", 30, 26, 50, B_TRUNCATE_END,
                                           B_ALIGN_RIGHT), kColNumber);
-  fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Title"), 170, 60, 500,
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Title"), 170, 60, 500,
                                           B_TRUNCATE_END), kColTitle);
-  fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Artist"), 125, 50, 400,
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Artist"), 125, 50, 400,
                                           B_TRUNCATE_END), kColArtist);
-  fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Length"), 52, 40, 80,
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Length"), 52, 40, 80,
                                           B_TRUNCATE_END, B_ALIGN_RIGHT),
                         kColLength);
-  fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Gain"), 62, 40, 90,
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Gain"), 62, 40, 90,
                                           B_TRUNCATE_END, B_ALIGN_RIGHT),
                         kColGain);
-  fTrackList->AddColumn(new BStringColumn(B_TRANSLATE("Status"), 195, 60, 500,
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Read errors"), 110, 50,
+                                          300, B_TRUNCATE_END), kColErrors);
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Status"), 195, 60, 500,
                                           B_TRUNCATE_END), kColStatus);
   for (const MediaItem &t : fTracks) {
     BRow *row = new BRow();
     BString number;
     number << t.track;
-    row->SetField(new BStringField(number.String()), kColNumber);
-    row->SetField(new BStringField(t.title.String()), kColTitle);
-    row->SetField(new BStringField(t.artist.String()), kColArtist);
-    row->SetField(new BStringField(FormatDuration(t.duration).String()),
+    row->SetField(new CheckField(), kColCheck);
+    row->SetField(new TrackField(number.String()), kColNumber);
+    row->SetField(new TrackField(t.title.String()), kColTitle);
+    row->SetField(new TrackField(t.artist.String()), kColArtist);
+    row->SetField(new TrackField(FormatDuration(t.duration).String()),
                   kColLength);
-    row->SetField(new BStringField(""), kColGain);
-    row->SetField(new BStringField(""), kColStatus);
+    row->SetField(new TrackField(""), kColGain);
+    row->SetField(new TrackField(""), kColErrors);
+    row->SetField(new TrackField(""), kColStatus);
     fTrackList->AddRow(row);
   }
   fTrackList->SetExplicitMinSize(BSize(B_SIZE_UNSET, 180));
+  fTrackList->SetInvocationMessage(new BMessage(kMsgPlayTrack));
+  fRippedPaths.assign(fTracks.size(), BString());
+
+  fAllCheck = new BCheckBox("all", B_TRANSLATE("All tracks"),
+                            new BMessage(kMsgToggleAll));
+  fAllCheck->SetValue(B_CONTROL_ON);
+  // A checkbox's maximum width is its text width, which would cap the
+  // whole window's width (see the other views above).
+  fAllCheck->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 
   fFormatMenu = new BPopUpMenu("format");
   const struct {
@@ -251,6 +399,12 @@ void CDRipWindow::_BuildUI() {
       "verify", B_TRANSLATE("Check rips with AccurateRip (needs internet)"),
       new BMessage(kMsgVerifyChanged));
   fVerifyCheck->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+  fLibraryCheck = new BCheckBox("library", B_TRANSLATE("Add tracks to library"),
+                                nullptr);
+  fLibraryCheck->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+  fLibraryCheck->SetToolTip(B_TRANSLATE(
+      "If the save folder isn't one of the library's folders yet, it is "
+      "added to them."));
 
   fProgress = new BStatusBar("progress");
   fProgress->SetMaxValue(kProgressMax);
@@ -269,6 +423,7 @@ void CDRipWindow::_BuildUI() {
   BLayoutBuilder::Group<>(this, B_VERTICAL)
     .SetInsets(B_USE_WINDOW_INSETS)
     .Add(fDiscInfo)
+    .Add(fAllCheck)
     .Add(fTrackList, 10)
     .AddGrid(B_USE_DEFAULT_SPACING, B_USE_SMALL_SPACING)
       .Add(fFormatField->CreateLabelLayoutItem(), 0, 0)
@@ -286,6 +441,7 @@ void CDRipWindow::_BuildUI() {
         .Add(fDriveInfo)
       .End()
       .Add(fVerifyCheck, 1, 7, 2)
+      .Add(fLibraryCheck, 1, 8, 2)
     .End()
     .Add(fProgress)
     .AddGroup(B_HORIZONTAL)
@@ -306,6 +462,8 @@ void CDRipWindow::_ApplySettings() {
   fFolderControl->SetText(fSettings.directory.String());
   fPatternControl->SetText(fSettings.pattern.String());
   fVerifyCheck->SetValue(fSettings.verify ? B_CONTROL_ON : B_CONTROL_OFF);
+  fLibraryCheck->SetValue(fSettings.addToLibrary ? B_CONTROL_ON
+                                                 : B_CONTROL_OFF);
 
   int32 offset = 0;
   BString text;
@@ -351,6 +509,52 @@ void CDRipWindow::_UpdateDriveInfo() {
   fDriveInfo->SetText(text.String());
 }
 
+bool CDRipWindow::_IsTrackChecked(int32 index) const {
+  BRow *row = fTrackList->RowAt(index);
+  CheckField *field =
+      row ? dynamic_cast<CheckField *>(row->GetField(kColCheck)) : nullptr;
+  return field != nullptr && field->checked;
+}
+
+int32 CDRipWindow::_CountCheckedTracks() const {
+  int32 count = 0;
+  for (int32 i = 0; i < fTrackList->CountRows(); i++)
+    count += _IsTrackChecked(i) ? 1 : 0;
+  return count;
+}
+
+void CDRipWindow::_CheckAllTracks(bool checked) {
+  for (int32 i = 0; i < fTrackList->CountRows(); i++) {
+    BRow *row = fTrackList->RowAt(i);
+    if (auto *field = dynamic_cast<CheckField *>(row->GetField(kColCheck)))
+      field->checked = checked;
+    fTrackList->UpdateRow(row);
+  }
+  _UpdateAllCheck();
+}
+
+void CDRipWindow::_UpdateAllCheck() {
+  const int32 checked = _CountCheckedTracks();
+  if (checked == 0)
+    fAllCheck->SetValue(B_CONTROL_OFF);
+  else if (checked == fTrackList->CountRows())
+    fAllCheck->SetValue(B_CONTROL_ON);
+  else
+    fAllCheck->SetValue(B_CONTROL_PARTIALLY_ON);
+  _UpdatePreview();
+}
+
+void CDRipWindow::_SetTrackResult(int32 index, int32 result) {
+  BRow *row = fTrackList->RowAt(index);
+  if (row == nullptr)
+    return;
+  for (int32 c = 0; c < fTrackList->CountColumns(); c++) {
+    if (auto *field = dynamic_cast<TrackField *>(row->GetField(c)))
+      field->result = (TrackResult)result;
+  }
+  fTrackList->UpdateRow(row);
+}
+
 void CDRipWindow::_SetTrackStatus(int32 index, const char *text) {
   BRow *row = fTrackList->RowAt(index);
   if (row == nullptr)
@@ -377,6 +581,7 @@ void CDRipWindow::_ReadControls() {
   fSettings.pattern = fPatternControl->Text();
   fSettings.pattern.Trim();
   fSettings.verify = fVerifyCheck->Value() == B_CONTROL_ON;
+  fSettings.addToLibrary = fLibraryCheck->Value() == B_CONTROL_ON;
 }
 
 void CDRipWindow::_UpdatePreview() {
@@ -410,6 +615,11 @@ void CDRipWindow::_UpdatePreview() {
       text.SetToFormat(B_TRANSLATE("Example: %s"), example.String());
     }
     ready = true;
+  }
+
+  if (ready && _CountCheckedTracks() == 0) {
+    text = B_TRANSLATE("No tracks are selected.");
+    ready = false;
   }
 
   fPreview->SetText(text.String());
@@ -449,6 +659,10 @@ void CDRipWindow::_SetRipping(bool ripping) {
   fPresetField->SetEnabled(!ripping);
   fOffsetControl->SetEnabled(!ripping);
   fVerifyCheck->SetEnabled(!ripping);
+  fLibraryCheck->SetEnabled(!ripping);
+  fAllCheck->SetEnabled(!ripping);
+  static_cast<CheckColumn *>(fCheckColumn)->SetLocked(ripping);
+  fTrackList->Invalidate();
   fShowButton->SetEnabled(!fOutputFolder.IsEmpty());
   fRipButton->SetLabel(ripping ? B_TRANSLATE("Stop") : B_TRANSLATE("Rip"));
   fRipButton->SetEnabled(true);
@@ -478,19 +692,25 @@ void CDRipWindow::_StartRip() {
   job.verify = fSettings.verify;
   job.offsetKnown = offsetKnown;
   job.offset = offset;
+  for (int32 i = 0; i < (int32)fTracks.size(); i++)
+    job.selected.push_back(_IsTrackChecked(i));
 
   for (int32 i = 0; i < (int32)fTracks.size(); i++) {
     if (BRow *row = fTrackList->RowAt(i)) {
-      if (auto *field = static_cast<BStringField *>(row->GetField(kColGain)))
-        field->SetString("");
+      for (int32 column : {kColGain, kColErrors}) {
+        if (auto *field = static_cast<BStringField *>(row->GetField(column)))
+          field->SetString("");
+      }
     }
-    _SetTrackStatus(i, "");
+    _SetTrackStatus(i, _IsTrackChecked(i) ? "" : B_TRANSLATE("Not selected"));
+    _SetTrackResult(i, kResultNone);
   }
   fCurrentTrack = -1;
   fCurrentPercent = -1;
 
   fFailures.clear();
   fOutputFolder.Truncate(0);
+  fRippedPaths.assign(fTracks.size(), BString());
 
   fRipper = new CDRipper(job, BMessenger(this));
   status_t status = fRipper->Start();
@@ -587,6 +807,59 @@ void CDRipWindow::_HandleTrackDone(BMessage *msg) {
     text.SetToFormat(B_TRANSLATE("Failed: %s"),
                      error.IsEmpty() ? strerror(status) : error.String());
   }
+  bool checked = false;
+  msg->FindBool("errors_checked", &checked);
+  int32 damagedSectors = 0, lostSectors = 0;
+  msg->FindInt32("err_damaged", &damagedSectors);
+  msg->FindInt32("err_unreadable", &lostSectors);
+
+  // Red: errors left, or the rip failed. Green: nothing left to fix, vivid
+  // when AccurateRip also confirms it. With neither check available, Beton
+  // can't vouch for the track and leaves it uncolored.
+  TrackResult result = kResultNone;
+  if (status != B_OK && status != B_FILE_EXISTS)
+    result = kResultBad;
+  else if (status == B_OK && (damagedSectors > 0 || lostSectors > 0))
+    result = kResultBad;
+  else if (status == B_OK && verdict == kRipAccurate)
+    result = kResultVerified;
+  else if (status == B_OK && checked)
+    result = kResultClean;
+  _SetTrackResult(track, result);
+  if ((status == B_OK || status == B_FILE_EXISTS) && !path.IsEmpty() &&
+      track >= 0 && track < (int32)fRippedPaths.size())
+    fRippedPaths[track] = path;
+  if (BRow *row = fTrackList->RowAt(track)) {
+    if (auto *field = static_cast<BStringField *>(row->GetField(kColErrors))) {
+      BString errors;
+      if (status == B_OK && checked) {
+        int32 fixed = 0, damaged = 0, unreadable = 0;
+        msg->FindInt32("err_fixed", &fixed);
+        msg->FindInt32("err_damaged", &damaged);
+        msg->FindInt32("err_unreadable", &unreadable);
+        // Counts are sectors (1/75 s): "fixed" re-read clean, "bad" kept
+        // the drive's best guess, "lost" became silence.
+        auto add = [&errors](int32 n, const char *format) {
+          if (n <= 0)
+            return;
+          BString part;
+          part.SetToFormat(format, (long)n);
+          if (!errors.IsEmpty())
+            errors << ", ";
+          errors << part;
+        };
+        add(fixed, B_TRANSLATE("%ld fixed"));
+        add(damaged, B_TRANSLATE("%ld bad"));
+        add(unreadable, B_TRANSLATE("%ld lost"));
+        if (errors.IsEmpty())
+          errors = B_TRANSLATE("None");
+      } else if (status == B_OK) {
+        errors = B_TRANSLATE("Not checked");
+      }
+      field->SetString(errors.String());
+    }
+  }
+
   _SetTrackStatus(track, text.String());
   fCurrentTrack = -1;
 
@@ -614,7 +887,8 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
 
   int32 ripped = 0, skipped = 0, failed = 0, accurate = 0, noMatch = 0;
   bool cancelled = false;
-  BString arNote, error;
+  BString arNote, error, errorsNote;
+  int32 tracksWithErrors = 0;
   msg->FindInt32("ripped", &ripped);
   msg->FindInt32("skipped", &skipped);
   msg->FindInt32("failed", &failed);
@@ -623,6 +897,8 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
   msg->FindBool("cancelled", &cancelled);
   msg->FindString("ar_note", &arNote);
   msg->FindString("error", &error);
+  msg->FindString("errors_note", &errorsNote);
+  msg->FindInt32("tracks_with_errors", &tracksWithErrors);
 
   if (cancelled && fCurrentTrack >= 0)
     _SetTrackStatus(fCurrentTrack, B_TRANSLATE("Stopped"));
@@ -648,19 +924,30 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
     part.SetToFormat(B_TRANSLATE("%ld accurate"), (long)accurate);
     summary << ", " << part;
   }
+  if (tracksWithErrors > 0) {
+    BString part;
+    if (tracksWithErrors == 1)
+      part = B_TRANSLATE("1 with read errors");
+    else
+      part.SetToFormat(B_TRANSLATE("%ld with read errors"), (long)tracksWithErrors);
+    summary << ", " << part;
+  }
   if (cancelled)
     summary << " " << B_TRANSLATE("(stopped)");
   else if (!arNote.IsEmpty() && ripped > 0)
     summary << " " << B_TRANSLATE("- AccurateRip:") << " " << arNote;
+  if (!cancelled && ripped > 0 && !errorsNote.IsEmpty())
+    summary << " " << B_TRANSLATE("- Read errors:") << " " << errorsNote;
 
   fProgress->SetTo(cancelled ? fProgress->CurrentValue() : kProgressMax,
                    summary.String(), "");
   _SetRipping(false);
   _UpdatePreview();
 
-  // Hand the new files over; the window side keeps the ones in the library.
-  if (ripped > 0 && fLibraryTarget.IsValid()) {
+  // Hand the new files over to be added to the library.
+  if (ripped > 0 && fSettings.addToLibrary && fLibraryTarget.IsValid()) {
     BMessage import(MSG_CD_RIP_IMPORT);
+    import.AddString("folder", fSettings.directory);
     BString path;
     for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++)
       import.AddString("path", path);
@@ -673,6 +960,18 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
                      error.String());
     (new BAlert(B_TRANSLATE("Rip audio CD"), text.String(), B_TRANSLATE("OK"),
                 nullptr, nullptr, B_WIDTH_AS_USUAL, B_STOP_ALERT))
+        ->Go(nullptr);
+  } else if (tracksWithErrors > 0 && !cancelled) {
+    BString text;
+    text.SetToFormat(
+        B_TRANSLATE("%ld tracks still had read errors after re-reading. The "
+                    "\"Read errors\" column shows how many sectors (1/75 s "
+                    "each): \"bad\" sectors hold the drive's best guess, "
+                    "\"lost\" ones are silent. Cleaning the disc and ripping "
+                    "those tracks again (delete their files first) may help."),
+        (long)tracksWithErrors);
+    (new BAlert(B_TRANSLATE("Rip audio CD"), text.String(), B_TRANSLATE("OK"),
+                nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT))
         ->Go(nullptr);
   } else if (noMatch > 0 && !cancelled) {
     // A partial mismatch points at the tracks; a total one at the disc.
@@ -728,6 +1027,34 @@ void CDRipWindow::_ShowOutputFolder() {
     be_roster->Launch(&ref);
 }
 
+void CDRipWindow::_PlaySelectedTrack() {
+  BRow *row = fTrackList->CurrentSelection();
+  const int32 clicked = row != nullptr ? fTrackList->IndexOf(row) : -1;
+  if (clicked < 0 || clicked >= (int32)fRippedPaths.size() ||
+      fRippedPaths[clicked].IsEmpty() || !fLibraryTarget.IsValid())
+    return;
+
+  // Queue every ripped track in disc order, so playback carries on to the
+  // next one, as it does in the library.
+  BMessage play(MSG_CD_RIP_PLAY);
+  int32 index = 0;
+  for (int32 i = 0; i < (int32)fRippedPaths.size(); i++) {
+    if (fRippedPaths[i].IsEmpty())
+      continue;
+    if (i == clicked)
+      play.AddInt32("index", index);
+    const MediaItem &t = fTracks[i];
+    play.AddString("path", fRippedPaths[i]);
+    play.AddString("title", t.title);
+    play.AddString("artist", t.artist);
+    play.AddString("album", t.album);
+    play.AddInt32("track", t.track);
+    play.AddInt32("duration", t.duration);
+    index++;
+  }
+  fLibraryTarget.SendMessage(&play);
+}
+
 void CDRipWindow::MessageReceived(BMessage *msg) {
   switch (msg->what) {
   case kMsgFormatChanged:
@@ -735,6 +1062,23 @@ void CDRipWindow::MessageReceived(BMessage *msg) {
   case kMsgPatternEdited:
   case kMsgVerifyChanged:
     _UpdatePreview();
+    break;
+
+  case kMsgToggleAll:
+    // A click on the mixed state checks everything, like a plain click.
+    _CheckAllTracks(fAllCheck->Value() != B_CONTROL_OFF);
+    break;
+
+  case kMsgTrackToggled:
+    fLastToggle = system_time();
+    _UpdateAllCheck();
+    break;
+
+  case kMsgPlayTrack:
+    // A double click on a checkbox toggles it twice; that is not a request
+    // to play.
+    if (system_time() - fLastToggle > 1000000)
+      _PlaySelectedTrack();
     break;
 
   case kMsgOffsetEdited:

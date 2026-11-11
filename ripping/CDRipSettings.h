@@ -25,6 +25,9 @@ struct CDRipSettings {
   BString directory; ///< Absolute folder the pattern is resolved against.
   BString pattern;   ///< Folder/file name pattern, see RipNamePattern.
   bool verify = true; ///< Check rips against the AccurateRip database.
+  /** Add ripped tracks to the library, adding the save folder to the
+   *  library's folders if it isn't in one already. */
+  bool addToLibrary = true;
 
   /**
    * @brief The remembered read offset of a drive.

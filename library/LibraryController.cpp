@@ -4,6 +4,7 @@
 #include "MetadataPropertiesWindow.h"
 #include "LibraryBrowserController.h"
 #include "MusicSourceManagerWindow.h"
+#include "MusicSourceSettings.h"
 #include "MediaLibraryCache.h"
 #include "Debug.h"
 #include "Messages.h"
@@ -18,6 +19,7 @@
 #include <NumberFormat.h>
 #include <MessageRunner.h>
 #include <Entry.h>
+#include <File.h>
 #include <FindDirectory.h>
 #include <Messenger.h>
 #include <Node.h>
@@ -73,6 +75,48 @@ static bool _IsTrashDirectory(const BDirectory &dir) {
 /**
  * @brief Moves a file on disk and updates library state on success.
  */
+namespace {
+
+bool IsInside(const BString &path, const std::vector<BString> &dirs) {
+  for (const BString &dir : dirs) {
+    BString prefix(dir);
+    if (!prefix.EndsWith("/"))
+      prefix << "/";
+    if (path.StartsWith(prefix))
+      return true;
+  }
+  return false;
+}
+
+/** Adds @p folder to the library's folders (directories.settings), keeping
+ *  the ones already there. */
+bool AddLibraryFolder(const BString &folder) {
+  BPath path;
+  if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
+    return false;
+  path.Append("Beton");
+  create_directory(path.Path(), 0755);
+  path.Append("directories.settings");
+
+  BMessage archive;
+  {
+    BFile in(path.Path(), B_READ_ONLY);
+    if (in.InitCheck() == B_OK && archive.Unflatten(&in) != B_OK)
+      return false; // Unreadable: don't overwrite what we can't keep.
+  }
+  BMessage source;
+  MusicSourceSettings(folder).SaveTo(&source);
+  archive.AddMessage("source", &source);
+
+  BFile out(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+  if (out.InitCheck() != B_OK || archive.Flatten(&out) != B_OK)
+    return false;
+  MusicSourceSettings::InvalidateCache();
+  return true;
+}
+
+} // namespace
+
 void LibraryController::ImportRippedFiles(BMessage *msg) {
   if (!fWindow->fMediaLibraryCache)
     return;
@@ -80,24 +124,40 @@ void LibraryController::ImportRippedFiles(BMessage *msg) {
   std::vector<BString> dirs;
   MediaLibraryCache::LoadDirectories(dirs);
 
-  BMessage scan(MSG_SCAN_FILES);
-  int32 queued = 0;
+  // Files outside every library folder would be dropped again by the next
+  // full scan, so the save folder joins the library first.
+  BString folder;
+  bool outside = false;
   BString path;
-  for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
-    for (const BString &dir : dirs) {
-      BString prefix(dir);
-      if (!prefix.EndsWith("/"))
-        prefix << "/";
-      if (path.StartsWith(prefix)) {
-        scan.AddString("path", path);
-        scan.AddInt32("playlist", -1); // Not from a playlist.
-        queued++;
-        break;
-      }
+  for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++)
+    outside = outside || !IsInside(path, dirs);
+  if (outside && msg->FindString("folder", &folder) == B_OK &&
+      !folder.IsEmpty()) {
+    if (AddLibraryFolder(folder)) {
+      DEBUG_PRINT("CD rip: added %s to the library folders\n",
+                  folder.String());
+      dirs.push_back(folder);
+      BString text;
+      text.SetToFormat(B_TRANSLATE("Added %s to the library folders."),
+                       folder.String());
+      fWindow->UpdateStatus(text, false);
+    } else {
+      DEBUG_PRINT("CD rip: could not add %s to the library folders\n",
+                  folder.String());
     }
   }
 
-  DEBUG_PRINT("CD rip: %ld of the ripped files are in the library\n",
+  BMessage scan(MSG_SCAN_FILES);
+  int32 queued = 0;
+  for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
+    if (!IsInside(path, dirs))
+      continue;
+    scan.AddString("path", path);
+    scan.AddInt32("playlist", -1); // Not from a playlist.
+    queued++;
+  }
+
+  DEBUG_PRINT("CD rip: adding %ld ripped files to the library\n",
               (long)queued);
   if (queued > 0)
     BMessenger(fWindow->fMediaLibraryCache).SendMessage(&scan);

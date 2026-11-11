@@ -52,6 +52,7 @@ SRCS = \
     radio/RadioStationEditorDialog.cpp \
     ripping/AccurateRip.cpp \
     ripping/CddaTracks.cpp \
+    ripping/CdDriveReader.cpp \
     ripping/CDRipper.cpp \
     ripping/CDRipSettings.cpp \
     ripping/CDRipWindow.cpp \

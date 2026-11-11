@@ -398,6 +398,36 @@ PlaybackQueueManager::PlayLocalSelection(MediaTableView *view,
   _SetPlayPauseIcon();
 }
 
+void
+PlaybackQueueManager::PlayItems(const std::vector<MediaItem> &items,
+                                int32 index)
+{
+  if (!fWindow || !fWindow->fPlaybackEngine || items.empty())
+    return;
+  if (index < 0 || index >= (int32)items.size())
+    index = 0;
+
+  if (fWindow->fRadioStationController)
+    fWindow->fRadioStationController->CancelQueuedPlay();
+
+  std::vector<std::string> queue;
+  fQueueItems.clear();
+  for (const MediaItem &item : items) {
+    queue.push_back(item.path.String());
+    fQueueItems[item.path] = item;
+  }
+
+  DEBUG_PRINT("PlayItems: start index=%ld (queue=%zu)\n", (long)index,
+              queue.size());
+  _ClearDlnaQueue();
+  // A plain queue: track end, repeat and shuffle behave as for a playlist.
+  fActiveSource = SourcePlaylist;
+  fWindow->fPlaybackEngine->Stop();
+  fWindow->fPlaybackEngine->SetQueue(queue);
+  fWindow->fPlaybackEngine->Play(index);
+  _SetPlayPauseIcon();
+}
+
 int32
 PlaybackQueueManager::_RandomIndex(int32 count)
 {

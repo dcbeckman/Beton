@@ -23,6 +23,25 @@ namespace CddaTracks {
  */
 std::vector<MediaItem> Read(const BString &cdPath);
 
+/** One entry of the disc's table of contents. */
+struct TocTrack {
+  uint8 number;
+  bool audio; ///< False for a data track (enhanced CD).
+  uint32 lba; ///< First sector, counted from the start of the program area.
+};
+
+/** The disc's table of contents. */
+struct Toc {
+  std::vector<TocTrack> tracks;
+  uint32 leadOut = 0; ///< First sector after the last track.
+};
+
+/**
+ * @brief Reads the table of contents cdda stores in the root's `CD:toc`
+ *        attribute (the drive's READ TOC reply, in MSF addresses).
+ */
+status_t ReadToc(const BString &cdPath, Toc &out);
+
 } // namespace CddaTracks
 
 #endif // BETON_CDDA_TRACKS_H
