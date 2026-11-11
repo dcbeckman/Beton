@@ -35,6 +35,8 @@ public:
   virtual ~PlaylistSidebarView();
 
   void SelectionChanged(int32 index) override;
+  /** Points the CD row for @p oldPath at @p newPath (the disc was renamed). */
+  void RenameCDPath(const BString &oldPath, const BString &newPath);
   void MessageReceived(BMessage *msg) override;
   void MouseDown(BPoint where) override;
   void MouseMoved(BPoint point, uint32 transit,

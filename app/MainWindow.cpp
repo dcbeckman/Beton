@@ -569,6 +569,8 @@ MainWindow::MainWindow()
  */
 MainWindow::~MainWindow() {
   fShuttingDown.store(true, std::memory_order_relaxed);
+  delete fCDRescanRunner;
+  fCDRescanRunner = nullptr;
   if (fRadioStationController)
     fRadioStationController->CancelQueuedPlay();
   if (fPlaybackEngine)
@@ -1047,7 +1049,25 @@ void MainWindow::MessageReceived(BMessage *msg) {
         _CheckMountedCDs();
         return;
       }
+      // Entries renamed in "/" (a CD's mount point) or on a CD (its tracks):
+      // Haiku's online CD lookup renames both a few seconds after mounting.
+      int32 device = -1;
+      msg->FindInt32("device", &device);
+      if ((opcode == B_ENTRY_MOVED || opcode == B_ENTRY_CREATED ||
+           opcode == B_ENTRY_REMOVED) &&
+          (device == fRootDevice ||
+           fCDDevicePaths.find(device) != fCDDevicePaths.end())) {
+        _ScheduleCDRescan();
+        return;
+      }
     }
+  }
+  if (msg->what == MSG_CD_RESCAN) {
+    delete fCDRescanRunner;
+    fCDRescanRunner = nullptr;
+    _CheckMountedCDs();
+    _ReloadShownCD();
+    return;
   }
 
   if (_HandleViewMessage(msg))
@@ -1483,7 +1503,30 @@ void MainWindow::ApplyColors() {
 
 void MainWindow::_InitCDVolumeMonitoring() {
   fVolumeRoster.StartWatching(BMessenger(this));
+  // Mount points live in "/"; renaming a volume renames its mount point.
+  BEntry root("/");
+  node_ref rootRef;
+  if (root.GetNodeRef(&rootRef) == B_OK) {
+    fRootDevice = rootRef.device;
+    watch_node(&rootRef, B_WATCH_DIRECTORY, BMessenger(this));
+  }
   _CheckMountedCDs();
+}
+
+void MainWindow::_ScheduleCDRescan() {
+  // Wait for a burst of renames (one per track) to finish.
+  delete fCDRescanRunner;
+  BMessage rescan(MSG_CD_RESCAN);
+  fCDRescanRunner = new BMessageRunner(BMessenger(this), &rescan, 500000, 1);
+}
+
+void MainWindow::_ReloadShownCD() {
+  if (!fIsCDMode || !fPlaylistLibrary || !fPlaylistLibrary->View())
+    return;
+  PlaylistSidebarView *sidebar = fPlaylistLibrary->View();
+  const int32 selected = sidebar->CurrentSelection();
+  if (selected >= 0 && sidebar->KindAt(selected) == PlaylistItemKind::CD)
+    sidebar->SelectionChanged(selected);
 }
 
 void MainWindow::_CheckMountedCDs() {
@@ -1492,12 +1535,17 @@ void MainWindow::_CheckMountedCDs() {
   roster.Rewind();
 
   std::vector<CDItemInfo> mountedCDs;
+  std::vector<dev_t> devices;
 
   while (roster.GetNextVolume(&vol) == B_OK) {
     fs_info info;
     if (fs_stat_dev(vol.Device(), &info) == B_OK && strcmp(info.fsh_name, "cdda") == 0) {
       BDirectory rootDir;
       if (vol.GetRootDirectory(&rootDir) == B_OK) {
+        // Track files get renamed too once the disc has been looked up.
+        node_ref discRef;
+        if (rootDir.GetNodeRef(&discRef) == B_OK)
+          watch_node(&discRef, B_WATCH_DIRECTORY, BMessenger(this));
         BEntry rootEntry;
         rootDir.GetEntry(&rootEntry);
         BPath rootPath;
@@ -1558,10 +1606,26 @@ void MainWindow::_CheckMountedCDs() {
           }
 
           mountedCDs.push_back({label, cdPath});
+          devices.push_back(vol.Device());
         }
       }
     }
   }
+
+  // A disc renamed since the last scan keeps its sidebar row (and stays
+  // selected) instead of looking like one disc ejected and another inserted.
+  std::map<dev_t, BString> paths;
+  for (size_t i = 0; i < mountedCDs.size(); i++) {
+    paths[devices[i]] = mountedCDs[i].path;
+    auto old = fCDDevicePaths.find(devices[i]);
+    if (old == fCDDevicePaths.end() || old->second == mountedCDs[i].path)
+      continue;
+    if (fPlaylistLibrary && fPlaylistLibrary->View())
+      fPlaylistLibrary->View()->RenameCDPath(old->second, mountedCDs[i].path);
+    if (fCDPath == old->second)
+      fCDPath = mountedCDs[i].path;
+  }
+  fCDDevicePaths = paths;
 
   if (fPlaylistLibrary && fPlaylistLibrary->View()) {
     fPlaylistLibrary->View()->SyncCDItems(mountedCDs);

@@ -188,6 +188,10 @@ private:
 #endif
   void _InitCDVolumeMonitoring();
   void _CheckMountedCDs();
+  /** Rescans CDs shortly after a rename, once the renames settle. */
+  void _ScheduleCDRescan();
+  /** Reloads the track list if a CD is being shown. */
+  void _ReloadShownCD();
 
 
   /** @name Data & State */
@@ -202,6 +206,11 @@ private:
   BString fCDPath;
   BMessenger fCDRipWindow; ///< The open "Rip audio CD" window, if any.
   BVolumeRoster fVolumeRoster;
+  /** Mounted CDs by device: a CD looked up online is renamed after mounting,
+   *  so its path changes while the device stays the same. */
+  std::map<dev_t, BString> fCDDevicePaths;
+  dev_t fRootDevice = -1;                     ///< Where mount points live.
+  BMessageRunner *fCDRescanRunner = nullptr;
   BString fPlaylistPath;
   BString fCurrentPlaylistName;
 

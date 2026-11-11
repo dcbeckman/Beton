@@ -593,6 +593,17 @@ BBitmap *PlaylistSidebarView::_IconFor(PlaylistItemKind kind,
   return nullptr;
 }
 
+void PlaylistSidebarView::RenameCDPath(const BString &oldPath,
+                                       const BString &newPath) {
+  for (int32 i = 0; i < CountItems(); ++i) {
+    if (KindAt(i) == PlaylistItemKind::CD && PathAt(i) == oldPath &&
+        (size_t)i < fItems.size()) {
+      fItems[i].path = newPath;
+      return;
+    }
+  }
+}
+
 void PlaylistSidebarView::SyncCDItems(const std::vector<CDItemInfo> &mountedCDs) {
   // Each disc gets its own icon, resolved lazily on first draw by _CdIconFor();
   // drop the cached icons of discs that have gone away.
