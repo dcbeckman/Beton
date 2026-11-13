@@ -201,6 +201,17 @@ bool PlaylistMessageHandler::HandleMessage(BMessage *msg) {
       fWindow->fLibraryController->AddRefsToLibrary(msg);
       break;
     }
+    // Onto the open sidebar folder's track list: into that folder on disk.
+    // Not Beton's own rows, which a slip of the mouse would rearrange on disk.
+    if (!msg->HasString("playlist") && msg->HasRef("refs") &&
+        fWindow->fIsFolderMode && !msg->HasBool("beton_tracks")) {
+      BMessage drop(*msg);
+      drop.what = MSG_DROP_INTO_FOLDER;
+      drop.AddString("folder", fWindow->fPlaylistLibrary->FolderPathForName(
+                                   fWindow->fCurrentPlaylistName));
+      fWindow->fLibraryController->DropIntoFolder(&drop);
+      break;
+    }
     fWindow->fPlaylistEditController->HandlePlaylistDrop(msg);
     break;
   }

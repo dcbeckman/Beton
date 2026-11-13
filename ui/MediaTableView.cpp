@@ -1628,6 +1628,7 @@ void MediaTableView::SaveScrollState() {
  */
 bool MediaTableView::InitiateDrag(BPoint point, bool wasSelected) {
   BMessage dragMsg(B_SIMPLE_DATA);
+  dragMsg.AddBool("beton_tracks", true);
 
   BRow *firstSelected = CurrentSelection();
   if (firstSelected) {

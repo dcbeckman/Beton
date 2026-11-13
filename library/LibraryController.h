@@ -92,6 +92,15 @@ public:
   void AddRefsToLibrary(const BMessage *msg);
 
   /**
+   * @brief Puts the "refs" dropped on a sidebar folder into that "folder":
+   *        moved on the same disk, copied (on a thread) from another one.
+   *        Asks once when names are taken; undoable.
+   */
+  void DropIntoFolder(const BMessage *msg);
+  /** @brief The copy thread of DropIntoFolder() has finished. */
+  void FolderCopyDone(const BMessage *msg);
+
+  /**
    * @brief Measures the loudness of the selected files on a background
    *        thread and writes ReplayGain tags into them.
    * @param msg MSG_ANALYZE_LOUDNESS with a "files" message of refs.

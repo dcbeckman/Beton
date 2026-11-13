@@ -295,6 +295,14 @@ bool MainWindow::_HandleAppCommandMessage(BMessage *msg) {
     fLibraryController->AddRefsToLibrary(msg);
     break;
 
+  case MSG_DROP_INTO_FOLDER:
+    fLibraryController->DropIntoFolder(msg);
+    break;
+
+  case MSG_FOLDER_COPY_DONE:
+    fLibraryController->FolderCopyDone(msg);
+    break;
+
   case B_CONTROL_INVOKED: {
     _HandleControlInvoked(msg);
     break;

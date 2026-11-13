@@ -22,6 +22,7 @@ SRCS = \
     library/MediaLibraryCache.cpp \
     library/LibraryMessageHandler.cpp \
     library/LibraryController.cpp \
+    library/LibraryFolderDrop.cpp \
     library/GainPrefetcher.cpp \
     library/GainStore.cpp \
     library/LibraryBrowserController.cpp \

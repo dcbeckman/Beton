@@ -217,6 +217,16 @@ void PlaylistSidebarView::MessageReceived(BMessage *msg) {
       for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; ++i)
         add.AddRef("refs", &ref);
       fTarget.SendMessage(&add);
+    } else if (KindAt(dropIndex) == PlaylistItemKind::Folder) {
+      // Onto a sidebar folder: into that folder on disk, as in Tracker.
+      BMessage drop(MSG_DROP_INTO_FOLDER);
+      drop.AddString("folder", fManager ? fManager->FolderPathForName(
+                                              ItemAt(dropIndex))
+                                        : PathAt(dropIndex));
+      entry_ref ref;
+      for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; ++i)
+        drop.AddRef("refs", &ref);
+      fTarget.SendMessage(&drop);
     } else {
       if (!IsWritableAt(dropIndex)) {
         if (hasDirectoryRef && allRefsAreDirectories && fManager) {
@@ -446,7 +456,8 @@ void PlaylistSidebarView::MouseMoved(BPoint point, uint32 transit,
     if (dragMsg->HasRef("refs")) {
       fLastDropPoint = point;
       int32 idx = HitIndex(point);
-      if (idx >= 0 && IsWritableAt(idx))
+      if (idx >= 0 &&
+          (IsWritableAt(idx) || KindAt(idx) == PlaylistItemKind::Folder))
         SetHoverIndex(idx);
       else
         SetHoverIndex(-1);
