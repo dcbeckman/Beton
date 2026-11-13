@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <errno.h>
+#include <map>
 #include <set>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,24 @@ const bigtime_t kProgressInterval = 200000;
  *  re-read that fixes nothing is often followed by one that does; stopping
  *  at the first miss halved the run time but left a third more sectors bad. */
 const int32 kRetries = 4;
+
+/** Time one chunk may spend on re-reads before what is still unread counts
+ *  as unreadable. A drive takes seconds to give up on a sector it can't read
+ *  (about 6.4 s each for a Slimtype eNAU108 on a scratched disc, traced
+ *  2026-11-12), so without a limit a chunk of such sectors with all their
+ *  retries could take about 7 minutes per 0.4 s of audio, and a rip sat at
+ *  0% with Stop waiting for the chunk to finish. */
+const bigtime_t kChunkTimeBudget = 30000000;
+
+/** The time a chunk gets once two chunks in a row have run out of
+ *  kChunkTimeBudget: a stretch that damaged gets one quick pass instead of
+ *  75 s of re-reads per second of audio (a disc with damage on every second
+ *  of a track, 2026-11-12). A chunk that finishes in time ends the streak. */
+const bigtime_t kStreakTimeBudget = 5000000;
+
+/** A failed read slower than this means the drive already retried it
+ *  itself: reading the same thing again at once is unlikely to help. */
+const bigtime_t kSlowRead = 2000000;
 
 /** How far to move away before a re-read, so the drive reads the disc again
  *  instead of answering from its cache (about 2 MB, ~900 sectors). */
@@ -202,7 +221,41 @@ void CDRipper::_SendProgress(size_t index, int64 framesDone, bool force) {
   msg.AddFloat("track_fraction",
                trackFrames > 0 ? (float)framesDone / (float)trackFrames : 0.0f);
   msg.AddString("title", fJob.tracks[index].title);
+  msg.AddInt32("unreadable", fLiveUnreadable.load());
   // Progress is best effort: never stall the rip on a busy window.
+  fTarget.SendMessage(&msg, (BHandler *)nullptr, 0);
+}
+
+void CDRipper::_SendDamageStatus(uint32 sector, uint32 done, uint32 count) {
+  const bigtime_t now = system_time();
+  if (done > 0 && now - fLastDamageStatus < kProgressInterval)
+    return;
+  fLastDamageStatus = now;
+
+  BMessage msg(MSG_CD_RIP_STATUS);
+  const int32 track = fReadingTrack.load();
+  if (track >= 0 && (size_t)track < fSpans.size()) {
+    // Where in the track, as a listener would find it.
+    const int64 at = (int64)(sector - fFirstLba) * 588 -
+                     (fSpans[track].firstFrame + fJob.offset);
+    const int64 secs = std::max<int64>(0, at) / 44100;
+    BString text;
+    text.SetToFormat(B_TRANSLATE("Track %ld: re-reading a damaged spot at "
+                                 "%ld:%02ld (sector %lu of %lu)"),
+                     (long)track + 1, (long)(secs / 60), (long)(secs % 60),
+                     (unsigned long)done + 1, (unsigned long)count);
+    msg.AddString("text", text);
+    msg.AddInt32("track", track);
+    msg.AddInt32("unreadable", fLiveUnreadable.load());
+    BString status;
+    status.SetToFormat(B_TRANSLATE("Damaged spot at %ld:%02ld"),
+                       (long)(secs / 60), (long)(secs % 60));
+    msg.AddString("track_status", status);
+  } else {
+    msg.AddString("text", B_TRANSLATE("Re-reading a damaged spot"
+                                      B_UTF8_ELLIPSIS));
+  }
+  // Best effort, as progress: never stall reading on a busy window.
   fTarget.SendMessage(&msg, (BHandler *)nullptr, 0);
 }
 
@@ -301,6 +354,58 @@ status_t CDRipper::_DriveRead(uint32 lba, uint32 count, uint8 *audio,
   return fDrive->Read(lba, count, audio, c2);
 }
 
+namespace {
+
+const int64 kFramesPerMs = 44100 / 1000;
+/** Wrong frames closer together than this sound as one glitch. */
+const int64 kGlitchGapFrames = 1 * kFramesPerMs;
+
+} // namespace
+
+void CDRipper::_NoteGlitchLevel(int64 start, double db) {
+  if (db > fStats.loudestDb) {
+    fStats.loudestDb = db;
+    fStats.loudestStart = start;
+  }
+}
+
+void CDRipper::_NoteBadFrame(int64 frame) {
+  ReadStats &s = fStats;
+  s.badFrames++;
+  if (s.lastBadFrame < 0 || frame - s.lastBadFrame > kGlitchGapFrames) {
+    s.glitches++;
+    s.runStart = frame;
+  }
+  s.lastBadFrame = frame;
+  const int32 length = (int32)(frame - s.runStart + 1);
+  if (length > s.longestFrames) {
+    s.longestFrames = length;
+    s.longestStart = s.runStart;
+  }
+}
+
+/*
+ * Graded on how much the worst glitch stands out from the music around it,
+ * not how long it lasts: on Turning Keys (2026-11-11) stretches of 4-13 ms
+ * that were wrong (no AccurateRip match) couldn't be heard. First guesses,
+ * to be tuned by ear:
+ *  - severe: any silent gap (an unreadable sector is 13 ms of silence), or a
+ *    glitch 20 dB or more above the music around it (a loud click);
+ *  - noticeable: 6 dB or more above it;
+ *  - minor: anything the music masks.
+ */
+CDRipper::ErrorGrade CDRipper::GradeErrors(const ReadStats &stats,
+                                           int64 trackFrames) {
+  (void)trackFrames;
+  if (stats.badFrames == 0)
+    return kErrorsNone;
+  if (stats.unreadable > 0 || stats.loudestDb >= 20.0)
+    return kErrorsSevere;
+  if (stats.loudestDb >= 6.0)
+    return kErrorsNoticeable;
+  return kErrorsMinor;
+}
+
 void CDRipper::_ReadDriveChunk(uint32 sector, uint32 count) {
   const size_t sb = CdDriveReader::kSectorBytes, cb = CdDriveReader::kC2Bytes;
   const uint32 lba = fFirstLba + sector;
@@ -309,17 +414,50 @@ void CDRipper::_ReadDriveChunk(uint32 sector, uint32 count) {
   // 0 = good, 1 = flagged by C2, 2 = unreadable.
   std::vector<uint8> state(count, 0);
 
+  if (_Abandoning()) {
+    // Stopping or skipping: the caller discards this, so don't touch the
+    // drive, and keep the silence out of the cache (count 0: nothing cached;
+    // the caller still copies this one sector out of fCacheAudio).
+    fCacheSector = sector;
+    fCacheCount = 0;
+    return;
+  }
+
+  // Stop and Skip are checked before every drive command, so they wait for
+  // one command at most, and a damaged spot gets kChunkTimeBudget (or
+  // kStreakTimeBudget in a long damaged stretch) before the rest of the chunk
+  // is given up as unreadable.
+  const bigtime_t deadline =
+      system_time() + (fDamageStreak >= 2 ? kStreakTimeBudget : kChunkTimeBudget);
+  auto outOfTime = [&] { return _Abandoning() || system_time() >= deadline; };
+
+  bigtime_t started = system_time();
   status_t status = _DriveRead(lba, count, fCacheAudio.data(), c2.data(), true);
-  for (int32 attempt = 0; status != B_OK && attempt < kRetries; attempt++)
+  bool slow = system_time() - started >= kSlowRead;
+  // Whole-chunk retries only for quick failures: a slow one means a sector
+  // the drive already gave up on, and the salvage below finds which.
+  for (int32 attempt = 0;
+       status != B_OK && !slow && attempt < kRetries && !outOfTime();
+       attempt++) {
+    started = system_time();
     status = _DriveRead(lba, count, fCacheAudio.data(), c2.data(), false);
+    slow = system_time() - started >= kSlowRead;
+  }
 
   if (status != B_OK) {
     // The chunk as a whole keeps failing: salvage it sector by sector.
     for (uint32 i = 0; i < count; i++) {
       status_t one = B_ERROR;
-      for (int32 attempt = 0; one != B_OK && attempt < 2; attempt++)
+      if (!outOfTime()) {
+        _SendDamageStatus(lba + i, i, count);
+        started = system_time();
         one = _DriveRead(lba + i, 1, fCacheAudio.data() + i * sb,
                          c2.data() + i * cb, false);
+        // A second try only after a quick failure, as above.
+        if (one != B_OK && system_time() - started < kSlowRead && !outOfTime())
+          one = _DriveRead(lba + i, 1, fCacheAudio.data() + i * sb,
+                           c2.data() + i * cb, false);
+      }
       if (one != B_OK) {
         memset(fCacheAudio.data() + i * sb, 0, sb);
         memset(c2.data() + i * cb, 0, cb);
@@ -352,7 +490,7 @@ void CDRipper::_ReadDriveChunk(uint32 sector, uint32 count) {
   // ignores SET CD SPEED and SET STREAMING for audio reads.
   std::vector<uint8> audio2((size_t)count * sb), c22((size_t)count * cb);
   for (int32 attempt = 0; flagged > 0 && attempt < kRetries; attempt++) {
-    if (fCancel)
+    if (outOfTime())
       break;
     const uint32 away = lba >= kSeekAwaySectors ? lba - kSeekAwaySectors
                                                 : lba + count + kSeekAwaySectors;
@@ -386,11 +524,111 @@ void CDRipper::_ReadDriveChunk(uint32 sector, uint32 count) {
     }
   }
 
+  if (!_Abandoning()) {
+    if (system_time() >= deadline) {
+      fDamageStreak++;
+      DEBUG_PRINT("CD rip: sectors %lu-%lu: out of time for re-reads "
+                  "(%ld in a row)\n", (unsigned long)lba,
+                  (unsigned long)(lba + count - 1), (long)fDamageStreak);
+    } else {
+      fDamageStreak = 0;
+    }
+  }
+
+  // Measure what is left. C2 flags single bytes, so a frame (4 bytes, one
+  // stereo sample) is wrong if it still holds a flagged byte; an unreadable
+  // sector is wholly silent.
+  const uint32 framesPerSector = (uint32)(sb / 4);
+  const uint32 total = count * framesPerSector;
+  std::vector<uint8> bad(total, 0);
+  bool anyBad = false;
   for (uint32 i = 0; i < count; i++) {
-    if (state[i] == 1)
+    if (state[i] == 1) {
       fStats.damaged++;
-    else if (state[i] == 2)
+      const uint8 *have = c2.data() + i * cb;
+      for (uint32 f = 0; f < framesPerSector; f++)
+        if (have[f / 2] & ((f & 1) ? 0x0F : 0xF0)) {
+          bad[i * framesPerSector + f] = 1;
+          anyBad = true;
+        }
+    } else if (state[i] == 2) {
       fStats.unreadable++;
+      memset(bad.data() + i * framesPerSector, 1, framesPerSector);
+      anyBad = true;
+    }
+  }
+
+  fLiveUnreadable = fStats.unreadable;
+
+  // A track this far gone isn't worth finishing: give up on it as Skip track
+  // would, without waiting for the rest to be read. The user sets how far
+  // (one ripped from a badly scratched disc came out more silence than
+  // music, 2026-11-12); 0 gives up at the first unreadable sector.
+  const int32 reading = fReadingTrack.load();
+  const int32 percent = fJob.giveUpPercent;
+  if (percent >= 0 && percent <= 10 && reading >= 0 &&
+      (size_t)reading < fSpans.size() && fSkipTrack.load() != reading) {
+    const int64 trackSectors = fSpans[reading].frames / framesPerSector;
+    if (trackSectors > 0 &&
+        (int64)fStats.unreadable * 100 > trackSectors * percent) {
+      DEBUG_PRINT("CD rip: track %ld: %ld of %lld sectors unreadable, giving "
+                  "up\n", (long)reading + 1, (long)fStats.unreadable,
+                  (long long)trackSectors);
+      fGaveUpTrack = reading;
+      fSkipTrack = reading;
+    }
+  }
+
+  if (anyBad) {
+    const int64 first = (int64)sector * framesPerSector; // disc frame
+    for (uint32 f = 0; f < total; f++)
+      if (bad[f])
+        _NoteBadFrame(first + f);
+
+    // How audible each glitch is: its sharpest break between neighboring
+    // samples (the second difference) against the roughest break in the good
+    // audio within 10 ms of it. Measured within this chunk.
+    auto sample = [&](int64 f, int c) {
+      f = std::max<int64>(0, std::min<int64>(f, total - 1));
+      const uint8 *b = fCacheAudio.data() + (size_t)f * 4 + c * 2;
+      return (int32)(int16)(b[0] | (b[1] << 8));
+    };
+    auto sharpness = [&](uint32 f) {
+      int32 most = 0;
+      for (int c = 0; c < 2; c++)
+        most = std::max(most, abs(2 * sample(f, c) - sample((int64)f - 1, c) -
+                                  sample((int64)f + 1, c)));
+      return most;
+    };
+    const int64 window = 10 * kFramesPerMs;
+    for (uint32 f = 0; f < total;) {
+      if (!bad[f]) {
+        f++;
+        continue;
+      }
+      // One glitch: wrong frames less than kGlitchGapFrames apart.
+      uint32 end = f, g = f;
+      while (g < total && g - end <= kGlitchGapFrames) {
+        if (bad[g])
+          end = g;
+        g++;
+      }
+      int32 peak = 0;
+      for (uint32 k = f; k <= end; k++)
+        peak = std::max(peak, sharpness(k));
+      int32 around = 0;
+      const int64 from = std::max<int64>(0, (int64)f - window);
+      const int64 to = std::min<int64>(total - 1, (int64)end + window);
+      for (int64 k = from; k <= to; k++)
+        if (!bad[k])
+          around = std::max(around, sharpness((uint32)k));
+      // A floor near the quietest audible level keeps silence from making
+      // every tiny error look huge.
+      const double db = 20.0 * log10(std::max(peak, 1) /
+                                     (double)std::max(around, 64));
+      _NoteGlitchLevel(first + f, db);
+      f = end + 1;
+    }
   }
   if (flagged > 0 || std::count(state.begin(), state.end(), 2) > 0)
     DEBUG_PRINT("CD rip: sectors %lu-%lu: %ld still flagged, %ld unreadable\n",
@@ -398,7 +636,8 @@ void CDRipper::_ReadDriveChunk(uint32 sector, uint32 count) {
                 (long)std::count(state.begin(), state.end(), 2));
 
   fCacheSector = sector;
-  fCacheCount = count;
+  // A chunk cut short by Stop or Skip isn't kept for the next track.
+  fCacheCount = _Abandoning() ? 0 : count;
 }
 
 void CDRipper::_ReadDiscFromDrive(int64 first, size_t count, uint32 *out) {
@@ -484,6 +723,8 @@ void CDRipper::_LookUp() {
                               "disc's table of contents");
     return;
   }
+  fDiscKey.SetToFormat("%08" B_PRIx32 "-%08" B_PRIx32 "-%08" B_PRIx32, id.id1,
+                       id.id2, id.cddb);
 
   BString error;
   status_t status = AccurateRip::Fetch(id, fDatabase, error);
@@ -497,50 +738,122 @@ void CDRipper::_LookUp() {
   }
 }
 
+void CDRipper::_ListedOffset() {
+  if (fJob.offsetKnown || !fJob.verify || fJob.driveName.IsEmpty())
+    return;
+
+  _SendStatus(B_TRANSLATE("Looking up the drive in AccurateRip"
+                          B_UTF8_ELLIPSIS));
+  int32 offset = 0, submissions = 0;
+  BString error;
+  status_t status =
+      AccurateRip::ListedDriveOffset(fJob.driveName, offset, submissions, error);
+  if (status != B_OK) {
+    DEBUG_PRINT("CD rip: %s not in AccurateRip's drive list (%s)\n",
+                fJob.driveName.String(),
+                status == B_ENTRY_NOT_FOUND ? "not listed" : error.String());
+    return;
+  }
+
+  DEBUG_PRINT("CD rip: drive list: %s reads %+ld (%ld submissions)\n",
+              fJob.driveName.String(), (long)offset, (long)submissions);
+  fJob.offset = offset;
+  fJob.offsetKnown = true;
+  fOffsetDetected = true;
+  fOffsetFromList = true;
+
+  BMessage msg(MSG_CD_RIP_OFFSET);
+  msg.AddInt32("offset", offset);
+  msg.AddBool("from_list", true);
+  msg.AddInt32("submissions", submissions);
+  fTarget.SendMessage(&msg);
+}
+
 void CDRipper::_DetectOffset() {
-  if (fJob.offsetKnown || fLookup != kRipAccurate || fSpans.size() < 3)
+  if (fJob.offsetKnown || fLookup != kRipAccurate)
     return;
 
   _SendStatus(B_TRANSLATE("Finding the drive's read offset" B_UTF8_ELLIPSIS));
 
-  // Use the shortest track that is neither first nor last (those have
-  // frames left out of their checksums): least to read again.
-  size_t best = 1;
-  for (size_t i = 2; i + 1 < fSpans.size(); i++) {
-    if (fSpans[i].frames < fSpans[best].frames)
-      best = i;
+  // Each track's sector 450 has its own checksum in the database, so a few
+  // sectors per track are enough. Tracks vote: a scratched one simply
+  // matches nowhere. A few entries are stored some frames out, so a track
+  // can match at two offsets; the one most tracks (then the most confident
+  // entries) agree on wins.
+  const size_t length = 588 + 2 * (size_t)kOffsetRange;
+  std::vector<uint32> frames(length);
+  std::map<int32, int32> votes, weight;
+  int32 read = 0;
+  for (size_t i = 0; i < fSpans.size() && !fCancel; i++) {
+    const Span &s = fSpans[i];
+    if (s.frames < (int64)AccurateRip::kFrame450 + 588)
+      continue;
+    BString error;
+    if (_ReadDisc(s.firstFrame + AccurateRip::kFrame450 - kOffsetRange, length,
+                  frames.data(), error) != B_OK) {
+      DEBUG_PRINT("CD rip: offset detection read of track %zu failed: %s\n",
+                  i + 1, error.String());
+      continue;
+    }
+    read++;
+    std::map<int32, int32> matches;
+    AccurateRip::FindOffset450(frames.data(), kOffsetRange, i, fDatabase,
+                               matches);
+    for (const auto &kv : matches) {
+      votes[kv.first]++;
+      weight[kv.first] += kv.second;
+    }
+    DEBUG_PRINT("CD rip: offset detection, track %zu: %zu offsets match\n",
+                i + 1, matches.size());
+
+    // Settled once 4 tracks agree on an offset.
+    int32 top = 0;
+    for (const auto &kv : votes)
+      top = std::max(top, kv.second);
+    if (top >= 4)
+      break;
   }
 
-  const Span &s = fSpans[best];
-  std::vector<uint32> frames((size_t)s.frames + 2 * kOffsetRange);
-  BString error;
-  if (_ReadDisc(s.firstFrame - kOffsetRange, frames.size(), frames.data(),
-                error) != B_OK) {
-    DEBUG_PRINT("CD rip: offset detection read failed: %s\n", error.String());
+  bool found = false;
+  int32 offset = 0;
+  for (const auto &kv : votes) {
+    const int32 o = kv.first;
+    if (!found || kv.second > votes[offset] ||
+        (kv.second == votes[offset] &&
+         (weight[o] > weight[offset] ||
+          (weight[o] == weight[offset] && abs(o) < abs(offset))))) {
+      offset = o;
+      found = true;
+    }
+  }
+
+  if (!found) {
+    // Without an offset the checksums would be taken at the wrong place
+    // and every track would "fail": leave AccurateRip out of this rip.
+    DEBUG_PRINT("CD rip: no read offset found (%ld tracks read)\n",
+                (long)read);
+    fLookup = kRipNotChecked;
+    BMessage msg(MSG_CD_RIP_OFFSET);
+    msg.AddBool("failed", true);
+    fTarget.SendMessage(&msg);
     return;
   }
 
-  int32 offset = 0, confidence = 0;
-  if (!AccurateRip::FindOffset(frames.data(), (uint32)s.frames, kOffsetRange,
-                               best, fDatabase, offset, confidence)) {
-    DEBUG_PRINT("CD rip: no read offset matched track %zu\n", best + 1);
-    return;
-  }
-
-  DEBUG_PRINT("CD rip: drive read offset %+ld (track %zu, confidence %ld)\n",
-              (long)offset, best + 1, (long)confidence);
+  DEBUG_PRINT("CD rip: drive read offset %+ld (%ld of %ld tracks agree)\n",
+              (long)offset, (long)votes[offset], (long)read);
   fJob.offset = offset;
   fJob.offsetKnown = true;
   fOffsetDetected = true;
 
   BMessage msg(MSG_CD_RIP_OFFSET);
   msg.AddInt32("offset", offset);
-  msg.AddInt32("confidence", confidence);
+  msg.AddInt32("confidence", weight[offset]);
   fTarget.SendMessage(&msg);
 }
 
 void CDRipper::_Run() {
   int32 ripped = 0, skipped = 0, failed = 0, accurate = 0, noMatch = 0;
+  int32 givenUp = 0; // Skip track
   int32 tracksWithErrors = 0;
   std::set<BString> written;
   std::vector<BString> rippedFiles;
@@ -555,6 +868,8 @@ void CDRipper::_Run() {
   } else {
     _OpenDrive();
     _LookUp();
+    if (!fCancel)
+      _ListedOffset();
     if (!fCancel)
       _DetectOffset();
   }
@@ -579,6 +894,10 @@ void CDRipper::_Run() {
     for (int32 n = 2; written.count(dest) > 0; n++)
       dest = NumberedPath(DestinationFor(fJob, track), n);
 
+    // Reset before the first progress message, which carries the count:
+    // otherwise the last track's unreadable sectors showed on this one's row.
+    fStats = ReadStats();
+    fLiveUnreadable = 0;
     _SendProgress(i, 0, true);
 
     BString error;
@@ -587,7 +906,6 @@ void CDRipper::_Run() {
     int32 confidence = -1;
     AccurateRip::Checksum checksum;
     LoudnessMeter loudness(44100, 2);
-    fStats = ReadStats();
 
     if (BEntry(dest.String()).Exists()) {
       status = B_FILE_EXISTS;
@@ -617,6 +935,8 @@ void CDRipper::_Run() {
         DEBUG_PRINT("CD rip: track %zu v1 %08" B_PRIx32 " v2 %08" B_PRIx32
                     " -> %d (%ld)\n", i + 1, checksum.V1(), checksum.V2(),
                     (int)verdict, (long)confidence);
+      } else if (status == B_INTERRUPTED) {
+        givenUp++;
       } else if (status != B_CANCELED) {
         failed++;
       }
@@ -634,17 +954,38 @@ void CDRipper::_Run() {
     done.AddString("error", error);
     done.AddInt32("ar", verdict);
     done.AddInt32("ar_confidence", confidence);
+    const ErrorGrade grade = GradeErrors(fStats, fSpans[i].frames);
     if (fDrive && status == B_OK)
       DEBUG_PRINT("CD rip: track %zu read errors: %ld flagged, %ld fixed, "
-                  "%ld damaged, %ld unreadable (sectors)\n", i + 1,
-                  (long)fStats.flagged, (long)fStats.fixed,
-                  (long)fStats.damaged, (long)fStats.unreadable);
+                  "%ld damaged, %ld unreadable (sectors); %lld frames wrong in "
+                  "%ld glitches, longest %ld frames (%.1f ms), worst stands "
+                  "out %.1f dB; grade %d\n",
+                  i + 1, (long)fStats.flagged, (long)fStats.fixed,
+                  (long)fStats.damaged, (long)fStats.unreadable,
+                  (long long)fStats.badFrames, (long)fStats.glitches,
+                  (long)fStats.longestFrames,
+                  fStats.longestFrames / (double)kFramesPerMs,
+                  fStats.loudestDb, (int)grade);
     done.AddBool("errors_checked", fDrive != nullptr && status == B_OK);
     done.AddInt32("err_flagged", fStats.flagged);
     done.AddInt32("err_fixed", fStats.fixed);
     done.AddInt32("err_damaged", fStats.damaged);
     done.AddInt32("err_unreadable", fStats.unreadable);
-    if (fStats.damaged > 0 || fStats.unreadable > 0)
+    done.AddInt32("err_glitches", fStats.glitches);
+    done.AddInt32("err_longest_frames", fStats.longestFrames);
+    // The loudest glitch: how loud, and where in the track, to listen to it.
+    if (fStats.glitches > 0) {
+      const int64 at =
+          fStats.loudestStart - (fSpans[i].firstFrame + fJob.offset);
+      done.AddInt64("err_loudest_at_ms", std::max<int64>(0, at) * 1000 / 44100);
+      done.AddFloat("err_loudest_db", (float)fStats.loudestDb);
+    }
+    done.AddInt32("err_grade", grade);
+    done.AddBool("gave_up", fGaveUpTrack.load() == (int32)i);
+    done.AddInt32("give_up_percent", fJob.giveUpPercent);
+    // Worth a warning: errors a listener may hear. An AccurateRip match
+    // proves the audio exact, so the flagged bytes were right after all.
+    if (grade >= kErrorsNoticeable && verdict != kRipAccurate)
       tracksWithErrors++;
     if (status == B_OK && std::isfinite(loudness.Loudness()))
       done.AddFloat("rg_gain", (float)loudness.Gain());
@@ -658,6 +999,7 @@ void CDRipper::_Run() {
 
   finished.AddInt32("ripped", ripped);
   finished.AddInt32("skipped", skipped);
+  finished.AddInt32("given_up", givenUp);
   finished.AddInt32("failed", failed);
   finished.AddInt32("accurate", accurate);
   finished.AddInt32("no_match", noMatch);
@@ -667,7 +1009,9 @@ void CDRipper::_Run() {
   finished.AddInt32("tracks_with_errors", tracksWithErrors);
   finished.AddBool("offset_known", fJob.offsetKnown);
   finished.AddBool("offset_detected", fOffsetDetected);
+  finished.AddBool("offset_from_list", fOffsetFromList);
   finished.AddInt32("offset", fJob.offset);
+  finished.AddString("disc_key", fDiscKey);
   finished.AddBool("cancelled", fCancel.load());
   fRunning = false;
   fTarget.SendMessage(&finished);
@@ -698,7 +1042,7 @@ status_t CDRipper::_ReadAheadEntry(void *data) {
   ReadAhead &ra = *static_cast<ReadAhead *>(data);
   int32 slot = 0;
   for (int64 done = 0; done < ra.frames; slot = (slot + 1) % ReadAhead::kSlots) {
-    if (acquire_sem(ra.free) != B_OK || ra.stop || ra.ripper->fCancel)
+    if (acquire_sem(ra.free) != B_OK || ra.stop || ra.ripper->_Abandoning())
       break;
     const size_t n = (size_t)std::min<int64>(kChunkFrames, ra.frames - done);
     ra.status = ra.ripper->_ReadDisc(ra.first + done, n,
@@ -766,6 +1110,8 @@ status_t CDRipper::_RipTrack(size_t index, const BString &dest,
     error = "Could not start reading the disc";
     return B_NO_MEMORY;
   }
+  fDamageStreak = 0;
+  fReadingTrack = (int32)index;
   resume_thread(reader);
 
   int64 done = 0;
@@ -774,6 +1120,13 @@ status_t CDRipper::_RipTrack(size_t index, const BString &dest,
   while (done < span.frames) {
     if (fCancel) {
       status = B_CANCELED;
+      break;
+    }
+    if (fSkipTrack.load() == (int32)index) {
+      status = B_INTERRUPTED;
+      error = fGaveUpTrack.load() == (int32)index
+                  ? B_TRANSLATE("Too damaged")
+                  : B_TRANSLATE("Skipped");
       break;
     }
     if (acquire_sem(ra.filled) != B_OK) {
@@ -810,6 +1163,7 @@ status_t CDRipper::_RipTrack(size_t index, const BString &dest,
   delete_sem(ra.filled);
   status_t ignored;
   wait_for_thread(reader, &ignored);
+  fReadingTrack = -1;
 
   if (status != B_OK) {
     encoder->Abort();

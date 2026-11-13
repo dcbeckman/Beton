@@ -21,15 +21,18 @@
 #include <Directory.h>
 #include <Entry.h>
 #include <FilePanel.h>
+#include <FindDirectory.h>
 #include <LayoutBuilder.h>
 #include <MenuField.h>
 #include <MenuItem.h>
+#include <MessageRunner.h>
 #include <Path.h>
 #include <PopUpMenu.h>
 #include <Roster.h>
 #include <StatusBar.h>
 #include <StringView.h>
 #include <TextControl.h>
+#include <Volume.h>
 
 #include <algorithm>
 #include <stdlib.h>
@@ -54,15 +57,22 @@ enum {
   kMsgVerifyChanged = 'rver',
   kMsgToggleAll = 'rtal',
   kMsgTrackToggled = 'rttg',
-  kMsgPlayTrack = 'rply'
+  kMsgPlayTrack = 'rply',
+  kMsgTrackMenu = 'rtmn',  ///< Right click on a track: "index", "where".
+  kMsgTrashTrack = 'rttr', ///< Move a track's ripped file to the Trash.
+  kMsgSkipTrack = 'rskp',
+  kMsgGiveUpEdited = 'rgue',
+  kMsgTick = 'rtik' ///< Once a second while ripping: the running times.
 };
 
 /** How a finished track came out; picks its text color in the track list. */
 enum TrackResult : int32 {
   kResultNone = 0, ///< Not ripped yet, skipped, stopped, or nothing checked.
   kResultClean,    ///< No read errors left, but no AccurateRip match.
-  kResultVerified, ///< No read errors left and an AccurateRip match.
-  kResultBad       ///< Read errors left after re-reading, or the rip failed.
+  kResultVerified, ///< No read errors left, or an AccurateRip match.
+  kResultMinor,    ///< Errors left that are likely inaudible.
+  kResultNoticeable, ///< Errors left that may be heard as clicks.
+  kResultBad       ///< Errors most people will hear, or the rip failed.
 };
 
 /** Whether a track is to be ripped. */
@@ -145,7 +155,26 @@ public:
  */
 class TrackColumn : public BStringColumn {
 public:
-  using BStringColumn::BStringColumn;
+  TrackColumn(const char *title, float width, float minWidth, float maxWidth,
+              uint32 truncate, alignment align = B_ALIGN_LEFT)
+      : BStringColumn(title, width, minWidth, maxWidth, truncate, align) {
+    // For the right-click menu. OutlineView still selects the row and
+    // treats a double click as before.
+    SetWantsEvents(true);
+  }
+
+  void MouseDown(BColumnListView *parent, BRow *row, BField *, BRect,
+                 BPoint where, uint32 buttons) override {
+    if ((buttons & B_SECONDARY_MOUSE_BUTTON) == 0 || row == nullptr)
+      return;
+    // Opened by the window once this click is handled, so the menu doesn't
+    // run inside the list's own mouse tracking.
+    BMessage menu(kMsgTrackMenu);
+    menu.AddInt32("index", parent->IndexOf(row));
+    parent->ScrollView()->ConvertToScreen(&where);
+    menu.AddPoint("where", where);
+    parent->Window()->PostMessage(&menu);
+  }
 
   void DrawField(BField *field, BRect rect, BView *parent) override {
     TrackField *f = dynamic_cast<TrackField *>(field);
@@ -162,6 +191,12 @@ public:
       break;
     case kResultClean:
       color = dark ? make_color(165, 205, 165) : make_color(90, 140, 90);
+      break;
+    case kResultMinor:
+      color = dark ? make_color(235, 215, 80) : make_color(150, 120, 0);
+      break;
+    case kResultNoticeable:
+      color = dark ? make_color(255, 165, 60) : make_color(205, 100, 0);
       break;
     default:
       color = dark ? make_color(255, 95, 95) : make_color(200, 0, 0);
@@ -183,6 +218,7 @@ enum {
   kColLength,
   kColGain,
   kColErrors,
+  kColElapsed,
   kColStatus
 };
 
@@ -240,6 +276,7 @@ CDRipWindow::CDRipWindow(const BString &discPath, const BString &discLabel,
 }
 
 CDRipWindow::~CDRipWindow() {
+  delete fTicker;
   delete fRipper;
   delete fFolderPanel;
 }
@@ -304,9 +341,16 @@ void CDRipWindow::_BuildUI() {
   fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Gain"), 62, 40, 90,
                                           B_TRUNCATE_END, B_ALIGN_RIGHT),
                         kColGain);
+  // The two message columns may grow as wide as their longest message (a
+  // grade, glitch count and loudest spot didn't fit in 300 pixels,
+  // 2026-11-12); the list scrolls sideways when they outgrow the window.
   fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Read errors"), 110, 50,
-                                          300, B_TRUNCATE_END), kColErrors);
-  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Status"), 195, 60, 500,
+                                          1200, B_TRUNCATE_END), kColErrors);
+  // How long each track took (or has taken so far) to rip.
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Elapsed"), 62, 40, 100,
+                                          B_TRUNCATE_END, B_ALIGN_RIGHT),
+                        kColElapsed);
+  fTrackList->AddColumn(new TrackColumn(B_TRANSLATE("Status"), 195, 60, 1200,
                                           B_TRUNCATE_END), kColStatus);
   for (const MediaItem &t : fTracks) {
     BRow *row = new BRow();
@@ -320,6 +364,7 @@ void CDRipWindow::_BuildUI() {
                   kColLength);
     row->SetField(new TrackField(""), kColGain);
     row->SetField(new TrackField(""), kColErrors);
+    row->SetField(new TrackField(""), kColElapsed);
     row->SetField(new TrackField(""), kColStatus);
     fTrackList->AddRow(row);
   }
@@ -395,6 +440,16 @@ void CDRipWindow::_BuildUI() {
   fDriveInfo->SetTruncation(B_TRUNCATE_END);
   fDriveInfo->SetExplicitMinSize(BSize(100, B_SIZE_UNSET));
   fDriveInfo->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+  fGiveUpControl = new BTextControl("give_up", B_TRANSLATE("Give up at:"), "",
+                                    new BMessage(kMsgGiveUpEdited));
+  fGiveUpControl->SetModificationMessage(new BMessage(kMsgGiveUpEdited));
+  BStringView *giveUpInfo = new BStringView(
+      "give_up_info",
+      B_TRANSLATE("% of a track unreadable (0 to 10; anything else: never, "
+                  "only Skip track)"));
+  giveUpInfo->SetTruncation(B_TRUNCATE_END);
+  giveUpInfo->SetExplicitMinSize(BSize(100, B_SIZE_UNSET));
+  giveUpInfo->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
   fVerifyCheck = new BCheckBox(
       "verify", B_TRANSLATE("Check rips with AccurateRip (needs internet)"),
       new BMessage(kMsgVerifyChanged));
@@ -414,10 +469,17 @@ void CDRipWindow::_BuildUI() {
   fCloseButton =
       new BButton("close", B_TRANSLATE("Close"), new BMessage(kMsgClose));
   fRipButton = new BButton("rip", B_TRANSLATE("Rip"), new BMessage(kMsgRip));
+  // Gives up on the track being ripped (a hopelessly damaged one) and goes on
+  // with the next; only shown while ripping.
+  fSkipButton = new BButton("skip", B_TRANSLATE("Skip track"),
+                            new BMessage(kMsgSkipTrack));
 
   BLayoutItem *offsetText = fOffsetControl->CreateTextViewLayoutItem();
   offsetText->SetExplicitMinSize(BSize(60, B_SIZE_UNSET));
   offsetText->SetExplicitMaxSize(BSize(60, B_SIZE_UNSET));
+  BLayoutItem *giveUpText = fGiveUpControl->CreateTextViewLayoutItem();
+  giveUpText->SetExplicitMinSize(BSize(60, B_SIZE_UNSET));
+  giveUpText->SetExplicitMaxSize(BSize(60, B_SIZE_UNSET));
 
   // clang-format off
   BLayoutBuilder::Group<>(this, B_VERTICAL)
@@ -440,14 +502,20 @@ void CDRipWindow::_BuildUI() {
         .Add(offsetText)
         .Add(fDriveInfo)
       .End()
-      .Add(fVerifyCheck, 1, 7, 2)
-      .Add(fLibraryCheck, 1, 8, 2)
+      .Add(fGiveUpControl->CreateLabelLayoutItem(), 0, 7)
+      .AddGroup(B_HORIZONTAL, B_USE_DEFAULT_SPACING, 1, 7, 2)
+        .Add(giveUpText)
+        .Add(giveUpInfo)
+      .End()
+      .Add(fVerifyCheck, 1, 8, 2)
+      .Add(fLibraryCheck, 1, 9, 2)
     .End()
     .Add(fProgress)
     .AddGroup(B_HORIZONTAL)
       .Add(fShowButton)
       .AddGlue()
       .Add(fCloseButton)
+      .Add(fSkipButton)
       .Add(fRipButton)
     .End();
   // clang-format on
@@ -464,6 +532,10 @@ void CDRipWindow::_ApplySettings() {
   fVerifyCheck->SetValue(fSettings.verify ? B_CONTROL_ON : B_CONTROL_OFF);
   fLibraryCheck->SetValue(fSettings.addToLibrary ? B_CONTROL_ON
                                                  : B_CONTROL_OFF);
+  BString giveUp;
+  if (fSettings.giveUpPercent >= 0)
+    giveUp << fSettings.giveUpPercent;
+  fGiveUpControl->SetText(giveUp.String());
 
   int32 offset = 0;
   BString text;
@@ -489,6 +561,74 @@ bool CDRipWindow::_ParseOffset(int32 &offset, bool &known) const {
   return true;
 }
 
+int32 CDRipWindow::_ParseGiveUp() const {
+  // Anything but a whole number from 0 to 10 (empty, 11, "never") turns
+  // giving up off; only Skip track ends a track early then.
+  BString text(fGiveUpControl->Text());
+  text.Trim();
+  char *end = nullptr;
+  long value = strtol(text.String(), &end, 10);
+  if (text.IsEmpty() || end == text.String() || *end != '\0' || value < 0 ||
+      value > 10)
+    return -1;
+  return (int32)value;
+}
+
+void CDRipWindow::_ShowLiveUnreadable(int32 track, int32 sectors) {
+  if (sectors <= 0)
+    return;
+  BRow *row = fTrackList->RowAt(track);
+  if (row == nullptr)
+    return;
+  auto *field = static_cast<BStringField *>(row->GetField(kColErrors));
+  if (field == nullptr)
+    return;
+  // A sector is 1/75 s of audio, filled with silence.
+  BString text;
+  if (sectors == 1)
+    text.SetToFormat(B_TRANSLATE("1 unreadable sector (%.2f s)"),
+                     sectors / 75.0);
+  else
+    text.SetToFormat(B_TRANSLATE("%ld unreadable sectors (%.1f s)"),
+                     (long)sectors, sectors / 75.0);
+  if (text != field->String()) {
+    field->SetString(text.String());
+    fTrackList->UpdateRow(row);
+  }
+  // Red at once: an unreadable sector grades the track Severe when it is
+  // done (CDRipper::GradeErrors()). The result at the end still decides; an
+  // AccurateRip match turns it green.
+  _SetTrackResult(track, kResultBad);
+}
+
+void CDRipWindow::_ShowTrackElapsed(int32 index) {
+  if (index < 0 || index >= (int32)fTrackStarted.size() ||
+      fTrackStarted[index] == 0)
+    return;
+  BRow *row = fTrackList->RowAt(index);
+  if (row == nullptr)
+    return;
+  auto *field = static_cast<BStringField *>(row->GetField(kColElapsed));
+  if (field == nullptr)
+    return;
+  const BString text = FormatDuration(
+      (int32)((system_time() - fTrackStarted[index]) / 1000000));
+  if (text != field->String()) {
+    field->SetString(text.String());
+    fTrackList->UpdateRow(row);
+  }
+}
+
+void CDRipWindow::_ShowTotalElapsed() {
+  if (fRipStarted == 0)
+    return;
+  BString text(fPercentText);
+  if (!text.IsEmpty())
+    text << "  ";
+  text << FormatDuration((int32)((system_time() - fRipStarted) / 1000000));
+  fProgress->SetTrailingText(text.String());
+}
+
 void CDRipWindow::_UpdateDriveInfo() {
   BString drive = fDriveName.IsEmpty() ? BString(B_TRANSLATE("this drive"))
                                        : fDriveName;
@@ -498,8 +638,12 @@ void CDRipWindow::_UpdateDriveInfo() {
   BString current(fOffsetControl->Text());
   current.Trim();
   if (!fDetectedOffset.IsEmpty() && current == fDetectedOffset) {
-    text.SetToFormat(B_TRANSLATE("samples, detected from AccurateRip for %s"),
-                     drive.String());
+    if (fDetectedFromList)
+      text.SetToFormat(B_TRANSLATE("samples, from AccurateRip's drive list "
+                                   "for %s"), drive.String());
+    else
+      text.SetToFormat(B_TRANSLATE("samples, detected from AccurateRip for %s"),
+                       drive.String());
   } else if (_ParseOffset(offset, known) && !known) {
     text.SetToFormat(B_TRANSLATE("unknown for %s: found from AccurateRip "
                                  "when you rip"), drive.String());
@@ -582,6 +726,7 @@ void CDRipWindow::_ReadControls() {
   fSettings.pattern.Trim();
   fSettings.verify = fVerifyCheck->Value() == B_CONTROL_ON;
   fSettings.addToLibrary = fLibraryCheck->Value() == B_CONTROL_ON;
+  fSettings.giveUpPercent = _ParseGiveUp();
 }
 
 void CDRipWindow::_UpdatePreview() {
@@ -660,12 +805,18 @@ void CDRipWindow::_SetRipping(bool ripping) {
   fOffsetControl->SetEnabled(!ripping);
   fVerifyCheck->SetEnabled(!ripping);
   fLibraryCheck->SetEnabled(!ripping);
+  fGiveUpControl->SetEnabled(!ripping);
   fAllCheck->SetEnabled(!ripping);
   static_cast<CheckColumn *>(fCheckColumn)->SetLocked(ripping);
   fTrackList->Invalidate();
   fShowButton->SetEnabled(!fOutputFolder.IsEmpty());
   fRipButton->SetLabel(ripping ? B_TRANSLATE("Stop") : B_TRANSLATE("Rip"));
   fRipButton->SetEnabled(true);
+  fSkipButton->SetEnabled(ripping);
+  if (ripping && fSkipButton->IsHidden())
+    fSkipButton->Show();
+  else if (!ripping && !fSkipButton->IsHidden())
+    fSkipButton->Hide();
 }
 
 void CDRipWindow::_StartRip() {
@@ -692,12 +843,14 @@ void CDRipWindow::_StartRip() {
   job.verify = fSettings.verify;
   job.offsetKnown = offsetKnown;
   job.offset = offset;
+  job.driveName = fDriveName;
+  job.giveUpPercent = fSettings.giveUpPercent;
   for (int32 i = 0; i < (int32)fTracks.size(); i++)
     job.selected.push_back(_IsTrackChecked(i));
 
   for (int32 i = 0; i < (int32)fTracks.size(); i++) {
     if (BRow *row = fTrackList->RowAt(i)) {
-      for (int32 column : {kColGain, kColErrors}) {
+      for (int32 column : {kColGain, kColErrors, kColElapsed}) {
         if (auto *field = static_cast<BStringField *>(row->GetField(column)))
           field->SetString("");
       }
@@ -729,6 +882,14 @@ void CDRipWindow::_StartRip() {
   fProgress->SetMaxValue(kProgressMax);
   fProgress->SetTo(0, B_TRANSLATE("Starting" B_UTF8_ELLIPSIS), "");
   _SetRipping(true);
+
+  fTrackStarted.assign(fTracks.size(), 0);
+  fTimingTrack = -1;
+  fPercentText = "";
+  fRipStarted = system_time();
+  delete fTicker;
+  BMessage tick(kMsgTick);
+  fTicker = new BMessageRunner(BMessenger(this), &tick, 1000000);
 }
 
 void CDRipWindow::_HandleProgress(BMessage *msg) {
@@ -752,12 +913,26 @@ void CDRipWindow::_HandleProgress(BMessage *msg) {
       fTrackList->ScrollTo(row);
   }
 
+  int32 unreadable = 0;
+  if (msg->FindInt32("unreadable", &unreadable) == B_OK)
+    _ShowLiveUnreadable(track, unreadable);
+
   BString text;
   text.SetToFormat(B_TRANSLATE("Track %ld of %ld: %s"), (long)track + 1,
                    (long)tracks, title.String());
-  BString percent;
-  percent.SetToFormat("%d%%", (int)(fraction * 100.0f));
-  fProgress->SetTo(fraction * kProgressMax, text.String(), percent.String());
+  // A track's clock starts with its first progress message.
+  if (track != fTimingTrack && track >= 0 &&
+      track < (int32)fTrackStarted.size()) {
+    fTimingTrack = track;
+    if (fTrackStarted[track] == 0)
+      fTrackStarted[track] = system_time();
+  }
+  _ShowTrackElapsed(track);
+
+  fPercentText.SetToFormat("%d%%", (int)(fraction * 100.0f));
+  fProgress->SetTo(fraction * kProgressMax, text.String(),
+                   fPercentText.String());
+  _ShowTotalElapsed();
 }
 
 void CDRipWindow::_HandleTrackDone(BMessage *msg) {
@@ -803,58 +978,123 @@ void CDRipWindow::_HandleTrackDone(BMessage *msg) {
     }
   } else if (status == B_FILE_EXISTS) {
     text = B_TRANSLATE("Already there, not ripped again");
+  } else if (status == B_INTERRUPTED) {
+    // Skip track, or the ripper gave up on it; no file written either way.
+    const int32 percent = msg->GetInt32("give_up_percent", -1);
+    if (msg->GetBool("gave_up", false) && percent == 0)
+      text = B_TRANSLATE("Gave up at the first unreadable sector, not ripped");
+    else if (msg->GetBool("gave_up", false))
+      text.SetToFormat(B_TRANSLATE("Gave up: over %ld%% unreadable, not "
+                                   "ripped"), (long)percent);
+    else
+      text = B_TRANSLATE("Skipped, not ripped");
   } else {
     text.SetToFormat(B_TRANSLATE("Failed: %s"),
                      error.IsEmpty() ? strerror(status) : error.String());
   }
   bool checked = false;
   msg->FindBool("errors_checked", &checked);
-  int32 damagedSectors = 0, lostSectors = 0;
-  msg->FindInt32("err_damaged", &damagedSectors);
-  msg->FindInt32("err_unreadable", &lostSectors);
+  int32 grade = CDRipper::kErrorsNone;
+  msg->FindInt32("err_grade", &grade);
 
-  // Red: errors left, or the rip failed. Green: nothing left to fix, vivid
-  // when AccurateRip also confirms it. With neither check available, Beton
-  // can't vouch for the track and leaves it uncolored.
+  // Errors left: yellow, orange or red by how audible they are likely to be;
+  // red also for a failed rip. Green: nothing left to fix, vivid when
+  // AccurateRip confirms it -- which wins over flagged bytes, as a match
+  // proves the audio exact. With neither check available, Beton can't vouch
+  // for the track and leaves it uncolored.
   TrackResult result = kResultNone;
   if (status != B_OK && status != B_FILE_EXISTS)
     result = kResultBad;
-  else if (status == B_OK && (damagedSectors > 0 || lostSectors > 0))
-    result = kResultBad;
   else if (status == B_OK && verdict == kRipAccurate)
     result = kResultVerified;
+  else if (status == B_OK && grade == CDRipper::kErrorsSevere)
+    result = kResultBad;
+  else if (status == B_OK && grade == CDRipper::kErrorsNoticeable)
+    result = kResultNoticeable;
+  else if (status == B_OK && grade == CDRipper::kErrorsMinor)
+    result = kResultMinor;
   else if (status == B_OK && checked)
     result = kResultClean;
   _SetTrackResult(track, result);
   if ((status == B_OK || status == B_FILE_EXISTS) && !path.IsEmpty() &&
       track >= 0 && track < (int32)fRippedPaths.size())
     fRippedPaths[track] = path;
+  // Each track joins the library as soon as it is done (its file is complete
+  // by now). The end of the rip reads them all again for the album loudness.
+  if (status == B_OK && !path.IsEmpty() && fSettings.addToLibrary &&
+      fLibraryTarget.IsValid()) {
+    BMessage import(MSG_CD_RIP_IMPORT);
+    import.AddBool("add", true);
+    import.AddString("path", path);
+    fLibraryTarget.SendMessage(&import);
+  }
   if (BRow *row = fTrackList->RowAt(track)) {
     if (auto *field = static_cast<BStringField *>(row->GetField(kColErrors))) {
       BString errors;
       if (status == B_OK && checked) {
-        int32 fixed = 0, damaged = 0, unreadable = 0;
+        int32 fixed = 0, unreadable = 0, glitches = 0, longest = 0;
         msg->FindInt32("err_fixed", &fixed);
-        msg->FindInt32("err_damaged", &damaged);
         msg->FindInt32("err_unreadable", &unreadable);
-        // Counts are sectors (1/75 s): "fixed" re-read clean, "bad" kept
-        // the drive's best guess, "lost" became silence.
-        auto add = [&errors](int32 n, const char *format) {
-          if (n <= 0)
-            return;
+        msg->FindInt32("err_glitches", &glitches);
+        msg->FindInt32("err_longest_frames", &longest);
+        if (glitches == 0) {
+          // "Fixed" sectors (1/75 s) were flagged but read clean again.
+          if (fixed > 0)
+            errors.SetToFormat(B_TRANSLATE("None (%ld fixed)"), (long)fixed);
+          else
+            errors = B_TRANSLATE("None");
+        } else {
+          switch (grade) {
+          case CDRipper::kErrorsSevere:
+            errors = B_TRANSLATE("Severe");
+            break;
+          case CDRipper::kErrorsNoticeable:
+            errors = B_TRANSLATE("Noticeable");
+            break;
+          default:
+            errors = B_TRANSLATE("Minor");
+            break;
+          }
           BString part;
-          part.SetToFormat(format, (long)n);
-          if (!errors.IsEmpty())
-            errors << ", ";
-          errors << part;
-        };
-        add(fixed, B_TRANSLATE("%ld fixed"));
-        add(damaged, B_TRANSLATE("%ld bad"));
-        add(unreadable, B_TRANSLATE("%ld lost"));
-        if (errors.IsEmpty())
-          errors = B_TRANSLATE("None");
+          if (glitches == 1)
+            part = B_TRANSLATE("1 glitch");
+          else
+            part.SetToFormat(B_TRANSLATE("%ld glitches"), (long)glitches);
+          errors << ": " << part;
+          (void)longest;
+          // The worst glitch: how much it stands out from the music around
+          // it (0 dB or less: masked), and where, to listen to it.
+          float db = 0;
+          int64 atMs = -1;
+          if (msg->FindFloat("err_loudest_db", &db) == B_OK &&
+              msg->FindInt64("err_loudest_at_ms", &atMs) == B_OK) {
+            const int64 secs = atMs / 1000;
+            BString loudest;
+            loudest.SetToFormat(B_TRANSLATE("worst %+ld dB at %ld:%02ld"),
+                                (long)floor(db + 0.5), (long)(secs / 60),
+                                (long)(secs % 60));
+            errors << ", " << loudest;
+          }
+          if (unreadable > 0) {
+            BString gaps;
+            gaps.SetToFormat(B_TRANSLATE("%ld ms silent"),
+                             (long)(unreadable * 1000 / 75));
+            errors << ", " << gaps;
+          }
+          if (verdict == kRipAccurate)
+            errors << " " << B_TRANSLATE("(audio verified exact)");
+        }
       } else if (status == B_OK) {
         errors = B_TRANSLATE("Not checked");
+      } else if (status == B_INTERRUPTED) {
+        // Skipped or given up: keep what was found, which is why.
+        const int32 unreadable = msg->GetInt32("err_unreadable", 0);
+        if (unreadable == 1)
+          errors.SetToFormat(B_TRANSLATE("1 unreadable sector (%.2f s)"),
+                             unreadable / 75.0);
+        else if (unreadable > 1)
+          errors.SetToFormat(B_TRANSLATE("%ld unreadable sectors (%.1f s)"),
+                             (long)unreadable, unreadable / 75.0);
       }
       field->SetString(errors.String());
     }
@@ -862,6 +1102,10 @@ void CDRipWindow::_HandleTrackDone(BMessage *msg) {
 
   _SetTrackStatus(track, text.String());
   fCurrentTrack = -1;
+  // The track's time stops here and stays in Elapsed.
+  _ShowTrackElapsed(track);
+  if (track == fTimingTrack)
+    fTimingTrack = -1;
 
   if ((status == B_OK || status == B_FILE_EXISTS) && fOutputFolder.IsEmpty()) {
     BPath parent;
@@ -869,7 +1113,7 @@ void CDRipWindow::_HandleTrackDone(BMessage *msg) {
       fOutputFolder = parent.Path();
   }
 
-  if (status != B_OK && status != B_FILE_EXISTS) {
+  if (status != B_OK && status != B_FILE_EXISTS && status != B_INTERRUPTED) {
     BString line;
     line.SetToFormat(B_TRANSLATE("Track %ld (%s): %s"), (long)track + 1,
                      title.String(),
@@ -895,6 +1139,52 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
   msg->FindInt32("accurate", &accurate);
   msg->FindInt32("no_match", &noMatch);
   msg->FindBool("cancelled", &cancelled);
+
+  // An offset from AccurateRip's drive list is kept for the drive at once.
+  // A detected one only once a track confirms it on two different discs: a
+  // disc from an unusual pressing matches at the wrong offset on every track
+  // (Dead or Alive's "Rip It Up" found +83 for a Slimtype eNAU108 the drive
+  // list has at +6, 2026-11-12).
+  if (msg->GetBool("offset_detected", false)) {
+    int32 offset = 0;
+    msg->FindInt32("offset", &offset);
+    BString disc;
+    msg->FindString("disc_key", &disc);
+    int32 earlier = 0;
+    BString earlierDisc;
+    if (msg->GetBool("offset_from_list", false)) {
+      fSettings.SetDriveOffset(fDriveName, offset);
+      fSettings.ForgetOffsetCandidate(fDriveName);
+      fSettings.Save();
+    } else if (accurate > 0 &&
+               fSettings.OffsetCandidate(fDriveName, earlier, earlierDisc) &&
+               earlier == offset && earlierDisc != disc) {
+      fSettings.SetDriveOffset(fDriveName, offset);
+      fSettings.ForgetOffsetCandidate(fDriveName);
+      fSettings.Save();
+    } else if (accurate > 0) {
+      // First disc (or the same disc again): remember it, and detect again
+      // next time instead of trusting it yet.
+      fSettings.SetOffsetCandidate(fDriveName, offset, disc);
+      fSettings.Save();
+      fOffsetControl->SetText("");
+      fDetectedOffset = "";
+      fDetectedFromList = false;
+      BString text;
+      text.SetToFormat(B_TRANSLATE("unknown for %s: %+ld worked for this disc, "
+                                   "and is kept once another disc agrees"),
+                       fDriveName.IsEmpty() ? B_TRANSLATE("this drive")
+                                            : fDriveName.String(),
+                       (long)offset);
+      fDriveInfo->SetText(text.String());
+    } else {
+      // Nothing confirmed it (every track failed, or the rip stopped first):
+      // find it again next time rather than keep a guess.
+      fOffsetControl->SetText("");
+      fDetectedOffset = "";
+      _UpdateDriveInfo();
+    }
+  }
   msg->FindString("ar_note", &arNote);
   msg->FindString("error", &error);
   msg->FindString("errors_note", &errorsNote);
@@ -919,6 +1209,12 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
     part.SetToFormat(B_TRANSLATE("%ld failed"), (long)failed);
     summary << ", " << part;
   }
+  int32 givenUp = 0;
+  if (msg->FindInt32("given_up", &givenUp) == B_OK && givenUp > 0) {
+    BString part;
+    part.SetToFormat(B_TRANSLATE("%ld skipped"), (long)givenUp);
+    summary << ", " << part;
+  }
   if (accurate + noMatch > 0) {
     BString part;
     part.SetToFormat(B_TRANSLATE("%ld accurate"), (long)accurate);
@@ -927,9 +1223,9 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
   if (tracksWithErrors > 0) {
     BString part;
     if (tracksWithErrors == 1)
-      part = B_TRANSLATE("1 with read errors");
+      part = B_TRANSLATE("1 with audible errors");
     else
-      part.SetToFormat(B_TRANSLATE("%ld with read errors"), (long)tracksWithErrors);
+      part.SetToFormat(B_TRANSLATE("%ld with audible errors"), (long)tracksWithErrors);
     summary << ", " << part;
   }
   if (cancelled)
@@ -939,14 +1235,30 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
   if (!cancelled && ripped > 0 && !errorsNote.IsEmpty())
     summary << " " << B_TRANSLATE("- Read errors:") << " " << errorsNote;
 
+  delete fTicker;
+  fTicker = nullptr;
+  if (fTimingTrack >= 0) {
+    // Stopped mid-track: its time so far stays.
+    _ShowTrackElapsed(fTimingTrack);
+    fTimingTrack = -1;
+  }
+  BString total;
+  if (fRipStarted > 0)
+    total.SetToFormat(B_TRANSLATE("Total %s"),
+                      FormatDuration((int32)((system_time() - fRipStarted) /
+                                             1000000)).String());
+  fRipStarted = 0;
   fProgress->SetTo(cancelled ? fProgress->CurrentValue() : kProgressMax,
-                   summary.String(), "");
+                   summary.String(), total.String());
   _SetRipping(false);
   _UpdatePreview();
 
-  // Hand the new files over to be added to the library.
-  if (ripped > 0 && fSettings.addToLibrary && fLibraryTarget.IsValid()) {
+  // Hand the new files over to be added to the library. Sent even when they
+  // aren't to be added: in a sidebar folder they are added as they appear,
+  // and must be read again now that they are finished.
+  if (ripped > 0 && fLibraryTarget.IsValid()) {
     BMessage import(MSG_CD_RIP_IMPORT);
+    import.AddBool("add", fSettings.addToLibrary);
     import.AddString("folder", fSettings.directory);
     BString path;
     for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++)
@@ -964,11 +1276,12 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
   } else if (tracksWithErrors > 0 && !cancelled) {
     BString text;
     text.SetToFormat(
-        B_TRANSLATE("%ld tracks still had read errors after re-reading. The "
-                    "\"Read errors\" column shows how many sectors (1/75 s "
-                    "each): \"bad\" sectors hold the drive's best guess, "
-                    "\"lost\" ones are silent. Cleaning the disc and ripping "
-                    "those tracks again (delete their files first) may help."),
+        B_TRANSLATE("%ld tracks still had read errors after re-reading that "
+                    "may be heard as clicks or gaps (orange or red). The "
+                    "\"Read errors\" column says how many glitches each has "
+                    "and how long the longest is. Cleaning the disc and "
+                    "ripping those tracks again (delete their files first) "
+                    "may help."),
         (long)tracksWithErrors);
     (new BAlert(B_TRANSLATE("Rip audio CD"), text.String(), B_TRANSLATE("OK"),
                 nullptr, nullptr, B_WIDTH_AS_USUAL, B_WARNING_ALERT))
@@ -1005,18 +1318,28 @@ void CDRipWindow::_HandleFinished(BMessage *msg) {
 }
 
 void CDRipWindow::_HandleOffset(BMessage *msg) {
-  int32 offset = 0, confidence = 0;
+  if (msg->GetBool("failed", false)) {
+    BString text;
+    text.SetToFormat(B_TRANSLATE("could not be found for %s on this disc, so "
+                                 "this rip isn't checked against "
+                                 "AccurateRip. Enter it if you know it."),
+                     fDriveName.IsEmpty() ? B_TRANSLATE("this drive")
+                                          : fDriveName.String());
+    fDriveInfo->SetText(text.String());
+    return;
+  }
+
+  int32 offset = 0;
   if (msg->FindInt32("offset", &offset) != B_OK)
     return;
-  msg->FindInt32("confidence", &confidence);
 
+  // Shown now, but saved for the drive only at the end (see _HandleFinished):
+  // from the drive list at once, a detected one once two discs agree.
   BString text;
   text.SetToFormat("%+ld", (long)offset);
   fOffsetControl->SetText(text.String());
-  fSettings.SetDriveOffset(fDriveName, offset);
-  fSettings.Save();
-
   fDetectedOffset = text;
+  fDetectedFromList = msg->GetBool("from_list", false);
   _UpdateDriveInfo();
 }
 
@@ -1025,6 +1348,80 @@ void CDRipWindow::_ShowOutputFolder() {
   entry_ref ref;
   if (get_ref_for_path(folder.String(), &ref) == B_OK)
     be_roster->Launch(&ref);
+}
+
+bool CDRipWindow::_HasRippedFile(int32 index) const {
+  return index >= 0 && index < (int32)fRippedPaths.size() &&
+         !fRippedPaths[index].IsEmpty() &&
+         BEntry(fRippedPaths[index].String()).Exists();
+}
+
+void CDRipWindow::_ShowTrackMenu(int32 index, BPoint where) {
+  const bool hasFile = _HasRippedFile(index);
+  BPopUpMenu *menu = new BPopUpMenu("track", false, false);
+  BMenuItem *play =
+      new BMenuItem(B_TRANSLATE("Play"), new BMessage(kMsgPlayTrack));
+  play->SetEnabled(hasFile);
+  menu->AddItem(play);
+  menu->AddSeparatorItem();
+  BMessage *trash = new BMessage(kMsgTrashTrack);
+  trash->AddInt32("index", index);
+  BMenuItem *trashItem =
+      new BMenuItem(B_TRANSLATE("Move ripped file to Trash"), trash);
+  trashItem->SetEnabled(hasFile);
+  menu->AddItem(trashItem);
+  menu->SetTargetForItems(this);
+  menu->SetAsyncAutoDestruct(true);
+  menu->Go(where, true, true, true);
+}
+
+void CDRipWindow::_TrashRippedFile(int32 index) {
+  if (!_HasRippedFile(index))
+    return;
+  const BString path = fRippedPaths[index];
+
+  // The Trash of the file's own volume: a move can't cross volumes.
+  BEntry entry(path.String());
+  node_ref nref;
+  BVolume volume;
+  BPath trash;
+  if (entry.GetNodeRef(&nref) != B_OK || volume.SetTo(nref.device) != B_OK ||
+      find_directory(B_TRASH_DIRECTORY, &trash, true, &volume) != B_OK) {
+    _SetTrackStatus(index, B_TRANSLATE("Could not find the Trash"));
+    return;
+  }
+  // "Name 2.flac" when the Trash already holds one by that name.
+  BString leaf(BPath(path.String()).Leaf());
+  BPath target(trash.Path(), leaf.String());
+  BString base(leaf), ext;
+  const int32 dot = leaf.FindLast('.');
+  if (dot > 0) {
+    leaf.CopyInto(base, 0, dot);
+    leaf.CopyInto(ext, dot, leaf.Length() - dot);
+  }
+  for (int32 n = 2; BEntry(target.Path()).Exists(); n++) {
+    BString name;
+    name << base << " " << n << ext;
+    target.SetTo(trash.Path(), name.String());
+  }
+
+  // The main window moves it, as the library's own Move to Trash does: the
+  // track leaves the library and its playlists, and Tracker can restore it.
+  BMessage move(MSG_FILE_MOVE);
+  move.AddString("from", path);
+  move.AddString("to", target.Path());
+  if (!fLibraryTarget.IsValid() || fLibraryTarget.SendMessage(&move) != B_OK) {
+    _SetTrackStatus(index, B_TRANSLATE("Could not move the file to the Trash"));
+    return;
+  }
+
+  fRippedPaths[index] = "";
+  if (BRow *row = fTrackList->RowAt(index)) {
+    if (auto *field = static_cast<BStringField *>(row->GetField(kColGain)))
+      field->SetString("");
+  }
+  _SetTrackResult(index, kResultNone);
+  _SetTrackStatus(index, B_TRANSLATE("Moved to Trash"));
 }
 
 void CDRipWindow::_PlaySelectedTrack() {
@@ -1081,15 +1478,51 @@ void CDRipWindow::MessageReceived(BMessage *msg) {
       _PlaySelectedTrack();
     break;
 
+  case kMsgTrackMenu: {
+    int32 index = -1;
+    BPoint where;
+    if (msg->FindInt32("index", &index) == B_OK &&
+        msg->FindPoint("where", &where) == B_OK)
+      _ShowTrackMenu(index, where);
+    break;
+  }
+
+  case kMsgTrashTrack: {
+    int32 index = -1;
+    if (msg->FindInt32("index", &index) == B_OK)
+      _TrashRippedFile(index);
+    break;
+  }
+
   case kMsgOffsetEdited:
     _UpdateDriveInfo();
     _UpdatePreview();
     break;
 
+  case kMsgGiveUpEdited:
+    _UpdatePreview();
+    break;
+
+  case kMsgTick:
+    _ShowTrackElapsed(fTimingTrack);
+    _ShowTotalElapsed();
+    break;
+
   case MSG_CD_RIP_STATUS: {
     const char *text = nullptr;
-    if (msg->FindString("text", &text) == B_OK)
+    if (msg->FindString("text", &text) == B_OK) {
       fProgress->SetTo(fProgress->CurrentValue(), text, "");
+      _ShowTotalElapsed();
+    }
+    // A damaged spot: shown in the track's row until its percentage moves.
+    int32 track = -1;
+    const char *trackStatus = nullptr;
+    if (msg->FindInt32("track", &track) == B_OK &&
+        msg->FindString("track_status", &trackStatus) == B_OK)
+      _SetTrackStatus(track, trackStatus);
+    int32 unreadable = 0;
+    if (track >= 0 && msg->FindInt32("unreadable", &unreadable) == B_OK)
+      _ShowLiveUnreadable(track, unreadable);
     break;
   }
 
@@ -1129,6 +1562,16 @@ void CDRipWindow::MessageReceived(BMessage *msg) {
       fRipper->Cancel();
       fRipButton->SetLabel(B_TRANSLATE("Stopping" B_UTF8_ELLIPSIS));
       fRipButton->SetEnabled(false);
+      fSkipButton->SetEnabled(false);
+    }
+    break;
+
+  case kMsgSkipTrack:
+    // Named by index, so a click that lands as the track ends can't skip the
+    // next one.
+    if (fRipper != nullptr && fCurrentTrack >= 0) {
+      fRipper->SkipTrack(fCurrentTrack);
+      _SetTrackStatus(fCurrentTrack, B_TRANSLATE("Skipping" B_UTF8_ELLIPSIS));
     }
     break;
 
@@ -1144,6 +1587,43 @@ void CDRipWindow::MessageReceived(BMessage *msg) {
     // The sidebar asked for a rip window while this one is open.
     Activate();
     break;
+
+  case MSG_CD_EJECT: {
+    // The sidebar wants a disc ejected; the main window does it once this
+    // window has let go of the disc.
+    BString path;
+    msg->FindString("path", &path);
+    BMessage eject(*msg);
+    eject.AddBool("rip_window_done", true);
+    if (path != fDiscPath) {
+      fLibraryTarget.SendMessage(&eject);
+      break;
+    }
+    if (fRipper != nullptr && fRipper->IsRunning()) {
+      Activate();
+      BAlert *alert = new BAlert(
+          B_TRANSLATE("Eject Disc"),
+          B_TRANSLATE("Stop ripping and eject the disc?\n\nTracks that are "
+                      "already finished are kept; the track being ripped now "
+                      "is discarded."),
+          B_TRANSLATE("Keep ripping"), B_TRANSLATE("Stop and eject"), nullptr,
+          B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+      alert->SetShortcut(0, B_ESCAPE);
+      if (alert->Go() == 0)
+        break;
+    }
+    if (fRipper != nullptr) {
+      fRipper->Cancel();
+      fRipper->Wait();
+      delete fRipper;
+      fRipper = nullptr;
+    }
+    _ReadControls();
+    fSettings.Save();
+    fLibraryTarget.SendMessage(&eject);
+    Quit();
+    return;
+  }
 
   case MSG_CD_RIP_PROGRESS:
     _HandleProgress(msg);

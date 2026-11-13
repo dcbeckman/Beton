@@ -40,7 +40,8 @@ float SampleAt(const AVFrame *f, int channel, int index, int channels) {
 status_t LoudnessAnalyzer::AnalyzeFile(const char *path,
                                        const std::atomic<bool> *cancel,
                                        std::unique_ptr<LoudnessMeter> &out,
-                                       BString &error) {
+                                       BString &error,
+                                       const std::atomic<bool> *cancel2) {
   out.reset();
   AVFormatContext *fmt = nullptr;
   int err = avformat_open_input(&fmt, path, nullptr, nullptr);
@@ -113,7 +114,8 @@ status_t LoudnessAnalyzer::AnalyzeFile(const char *path,
         drain();
       }
       av_packet_unref(packet);
-      if (cancel != nullptr && cancel->load()) {
+      if ((cancel != nullptr && cancel->load()) ||
+          (cancel2 != nullptr && cancel2->load())) {
         status = B_CANCELED;
         break;
       }

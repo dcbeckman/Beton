@@ -87,6 +87,8 @@ void SettingsController::SaveSettingsToMessage(BMessage &state) {
                    fWindow->fPlaybackEngine->ReplayGainModeValue());
   state.AddBool("show_tooltips", fWindow->fShowTooltips);
   state.AddBool("fast_edit_enabled", fWindow->fFastEditEnabled);
+  state.AddBool("gain_prefetch", fWindow->fGainPrefetch);
+  state.AddBool("gain_write_files", fWindow->fGainWriteFiles);
 
   if (fWindow->fIsMuted) {
     state.AddInt32("volume_level", (int32)fWindow->fPreMuteVolume);
@@ -247,6 +249,16 @@ void SettingsController::LoadSettingsFromMessage(BMessage &state) {
   if (state.FindInt32("replaygain_mode", &replayGainMode) != B_OK)
     replayGainMode = AudioPlaybackEngine::kReplayGainAuto;
   fWindow->SetReplayGainMode(replayGainMode);
+
+  bool gainSetting;
+  if (state.FindBool("gain_prefetch", &gainSetting) == B_OK)
+    fWindow->fGainPrefetch = gainSetting;
+  if (state.FindBool("gain_write_files", &gainSetting) == B_OK)
+    fWindow->fGainWriteFiles = gainSetting;
+  if (fWindow->fGainPrefetchItem)
+    fWindow->fGainPrefetchItem->SetMarked(fWindow->fGainPrefetch);
+  if (fWindow->fGainWriteItem)
+    fWindow->fGainWriteItem->SetMarked(fWindow->fGainWriteFiles);
 
   int32 repeatMode = PlaybackQueueManager::RepeatOff;
   if (state.FindInt32("repeat_mode", &repeatMode) == B_OK) {

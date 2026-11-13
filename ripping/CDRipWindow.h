@@ -16,6 +16,7 @@ class BColumn;
 class BColumnListView;
 class BFilePanel;
 class BMenuField;
+class BMessageRunner;
 class BPopUpMenu;
 class BStatusBar;
 class BStringView;
@@ -49,10 +50,24 @@ private:
   void _ReadControls();
   RipFormat _SelectedFormat() const;
   bool _ParseOffset(int32 &offset, bool &known) const;
+  /** The give-up field: 0-10, or -1 (never) for anything else. */
+  int32 _ParseGiveUp() const;
+  /** Shows a ripping track's unreadable sectors so far in Read errors. */
+  void _ShowLiveUnreadable(int32 track, int32 sectors);
   void _UpdateDriveInfo();
   void _SetTrackStatus(int32 index, const char *text);
   /** Colors a track's row: a TrackResult from CDRipWindow.cpp. */
   void _SetTrackResult(int32 index, int32 result);
+  /** Whether track @p index has a ripped file that still exists. */
+  bool _HasRippedFile(int32 index) const;
+  /** The right-click menu of track @p index, at screen point @p where. */
+  void _ShowTrackMenu(int32 index, BPoint where);
+  /** Moves track @p index's ripped file to the Trash, via the main window. */
+  void _TrashRippedFile(int32 index);
+  /** Shows how long track @p index has been ripping in Elapsed. */
+  void _ShowTrackElapsed(int32 index);
+  /** The progress bar's trailing text: percentage and total time so far. */
+  void _ShowTotalElapsed();
   bool _IsTrackChecked(int32 index) const;
   int32 _CountCheckedTracks() const;
   void _CheckAllTracks(bool checked);
@@ -85,8 +100,17 @@ private:
   BString fOutputFolder; ///< Folder of the first file written by the last rip.
   BString fDriveName;    ///< "vendor model", the key for the saved offset.
   BString fDetectedOffset; ///< Offset text the last rip detected, if any.
+  bool fDetectedFromList = false; ///< ...taken from AccurateRip's drive list.
   int32 fCurrentTrack = -1;
   int32 fCurrentPercent = -1;
+
+  // Rip timing: per track from its first progress message to its result,
+  // and the whole job from pressing Rip.
+  std::vector<bigtime_t> fTrackStarted; ///< Per track; 0 = not started.
+  int32 fTimingTrack = -1;              ///< Track whose clock is running.
+  bigtime_t fRipStarted = 0;            ///< 0 when no rip is running.
+  BString fPercentText;                 ///< The progress bar's "45%".
+  BMessageRunner *fTicker = nullptr;    ///< kMsgTick while ripping.
 
   BStringView *fDiscInfo = nullptr;
   BColumnListView *fTrackList = nullptr;
@@ -107,6 +131,8 @@ private:
   BButton *fShowButton = nullptr;
   BButton *fCloseButton = nullptr;
   BButton *fRipButton = nullptr;
+  BButton *fSkipButton = nullptr;
+  BTextControl *fGiveUpControl = nullptr;
 };
 
 #endif // BETON_CD_RIP_WINDOW_H

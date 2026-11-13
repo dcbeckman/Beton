@@ -4,6 +4,7 @@
 #include <String.h>
 #include <SupportDefs.h>
 
+#include <map>
 #include <vector>
 
 /**
@@ -19,8 +20,11 @@
  * accepts submissions from approved rippers.
  *
  * A drive reads a fixed number of samples early or late (its read offset),
- * which shifts every checksum. FindOffset() works the offset out from the
- * database itself, so no table of drive offsets is needed.
+ * which shifts every checksum. ListedDriveOffset() looks it up in
+ * AccurateRip's list of drives; for a drive not in it, FindOffset() works the
+ * offset out from the database itself. That can mislead: a disc from a
+ * pressing whose audio sits some samples off the common one matches at the
+ * wrong offset, which is why the list comes first.
  */
 namespace AccurateRip {
 
@@ -46,10 +50,16 @@ struct DiscId {
  */
 status_t ReadDiscId(const BString &cdPath, DiscId &out);
 
+/** Frames into a track where the offset-finding sector (sector 450) starts. */
+const uint32 kFrame450 = 450 * 588;
+
 /** One pressing's checksums as stored in the database. */
 struct Response {
   std::vector<uint8> confidence; ///< Per audio track.
   std::vector<uint32> crc;       ///< Per audio track; v1 or v2.
+  /** Per audio track: the v1-style sum over the track's sector 450 alone
+   *  (multipliers 1..588), for finding a drive's offset; 0 if not stored. */
+  std::vector<uint32> frame450;
 };
 
 /** Everything the database knows about one disc. */
@@ -63,6 +73,9 @@ struct Database {
    *        (0-based), or -1 when nothing matches.
    */
   int32 Match(size_t track, uint32 crc) const;
+
+  /** As Match(), for a sector-450 checksum. */
+  int32 Match450(size_t track, uint32 crc) const;
 };
 
 /** Parses a downloaded dBAR file. */
@@ -122,8 +135,45 @@ bool FindOffset(const uint32 *frames, uint32 trackFrames, int32 range,
                 size_t track, const Database &db, int32 &offset,
                 int32 &confidence);
 
+/**
+ * @brief Finds the offsets at which a track's sector 450 matches the
+ *        database: a few sectors to read instead of a whole track.
+ *
+ * @param frames 588 + 2 * @p range frames: frames[range] is the first frame
+ *        of the track's sector 450 at offset 0.
+ * @param range Largest offset tried.
+ * @param track 0-based track index.
+ * @param db The disc's database entry.
+ * @param matches Receives offset -> confidence of the best entry matching
+ *        there. Some entries are stored a few frames out, so more than one
+ *        offset can match; the caller weighs them across tracks.
+ */
+void FindOffset450(const uint32 *frames, int32 range, size_t track,
+                   const Database &db, std::map<int32, int32> &matches);
+
 /** The drive's vendor and model ("hp CDDVDW TS-H653R"), or empty. */
 BString DriveName(const BString &cdPath);
+
+/**
+ * @brief Looks a drive up in AccurateRip's list of drive read offsets.
+ *
+ * The list (DriveOffsets.bin, the one other rippers use) is downloaded once
+ * and kept in Beton's settings folder for 30 days; an old copy is used when
+ * the server can't be reached.
+ *
+ * @param driveName As DriveName() returns it.
+ * @param offset Receives the drive's read offset.
+ * @param submissions Receives how many people's rips the entry comes from.
+ * @return B_OK, B_ENTRY_NOT_FOUND if the drive isn't in the list, or an error
+ *         with @p error set.
+ */
+status_t ListedDriveOffset(const BString &driveName, int32 &offset,
+                           int32 &submissions, BString &error);
+
+/** Whether @p driveName is the drive a list entry names: "Vendor - Model"
+ *  against "Vendor Model Revision", ignoring case and spacing. Exposed for
+ *  tests. */
+bool DriveNameMatches(const BString &driveName, const char *listName);
 
 } // namespace AccurateRip
 

@@ -1,10 +1,12 @@
 #include "PlaybackMessageHandler.h"
 
+#include "LibraryController.h"
 #include "MainWindow.h"
 #include "Messages.h"
 #include "PlaybackTransportController.h"
 #include "PlaybackQueueManager.h"
 
+#include <MenuItem.h>
 #include <Message.h>
 
 /**
@@ -93,6 +95,28 @@ bool PlaybackMessageHandler::HandleMessage(BMessage *msg) {
   case MSG_SHUFFLE_TOGGLE: {
     if (fWindow->fPlaybackQueueManager)
       fWindow->fPlaybackQueueManager->ToggleShuffle();
+    return true;
+  }
+
+  case MSG_GAIN_PREFETCH_TICK:
+    if (fWindow->fLibraryController)
+      fWindow->fLibraryController->UpdateGainPrefetch();
+    return true;
+
+  case MSG_GAIN_PREFETCH_TOGGLE:
+  case MSG_GAIN_WRITE_TOGGLE: {
+    bool &setting = msg->what == MSG_GAIN_PREFETCH_TOGGLE
+                        ? fWindow->fGainPrefetch
+                        : fWindow->fGainWriteFiles;
+    BMenuItem *item = msg->what == MSG_GAIN_PREFETCH_TOGGLE
+                          ? fWindow->fGainPrefetchItem
+                          : fWindow->fGainWriteItem;
+    setting = !setting;
+    if (item)
+      item->SetMarked(setting);
+    if (fWindow->fLibraryController)
+      fWindow->fLibraryController->UpdateGainPrefetch();
+    fWindow->SaveSettings();
     return true;
   }
 

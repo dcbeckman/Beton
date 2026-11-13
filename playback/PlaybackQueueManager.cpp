@@ -134,7 +134,7 @@ PlaybackQueueManager::PlayNext()
       int32 count = fWindow->fPlaybackEngine->QueueSize();
       if (count > 0) {
         fShuffleHistory.push_back(fWindow->fPlaybackEngine->CurrentIndex());
-        fWindow->fPlaybackEngine->Play(_RandomIndex(count));
+        fWindow->fPlaybackEngine->Play(_TakeShuffleNext(count));
       }
     } else {
       fWindow->fPlaybackEngine->PlayNext();
@@ -211,7 +211,7 @@ PlaybackQueueManager::HandleTrackEnded()
       int32 count = fWindow->fPlaybackEngine->QueueSize();
       if (count > 0) {
         fShuffleHistory.push_back(fWindow->fPlaybackEngine->CurrentIndex());
-        fWindow->fPlaybackEngine->Play(_RandomIndex(count));
+        fWindow->fPlaybackEngine->Play(_TakeShuffleNext(count));
       }
     } else if (fRepeatMode == RepeatAll) {
       if (fWindow->fPlaybackEngine->CurrentIndex() + 1 <
@@ -432,6 +432,38 @@ int32
 PlaybackQueueManager::_RandomIndex(int32 count)
 {
   return std::uniform_int_distribution<int32>(0, count - 1)(fRng);
+}
+
+int32
+PlaybackQueueManager::_TakeShuffleNext(int32 count)
+{
+  int32 next = fShuffleNext;
+  fShuffleNext = -1;
+  return next >= 0 && next < count ? next : _RandomIndex(count);
+}
+
+int32
+PlaybackQueueManager::PeekNextIndex()
+{
+  if (!fWindow || !fWindow->fPlaybackEngine ||
+      (fActiveSource != SourceLibrary && fActiveSource != SourcePlaylist))
+    return -1;
+  AudioPlaybackEngine *engine = fWindow->fPlaybackEngine;
+  const int32 count = engine->QueueSize();
+  const int32 current = engine->CurrentIndex();
+  if (count <= 0 || current < 0)
+    return -1;
+  if (fRepeatMode == RepeatOne)
+    return current;
+  if (fShuffleEnabled) {
+    // Chosen now so it can be prepared; PlayNext() and the track's end use it.
+    if (fShuffleNext < 0 || fShuffleNext >= count)
+      fShuffleNext = _RandomIndex(count);
+    return fShuffleNext;
+  }
+  if (current + 1 < count)
+    return current + 1;
+  return fRepeatMode == RepeatAll ? 0 : -1;
 }
 
 void

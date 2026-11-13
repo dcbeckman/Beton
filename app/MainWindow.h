@@ -309,6 +309,13 @@ private:
   BMenuItem *fTooltipsOffItem = nullptr;
 
   bool fFastEditEnabled = false;
+  /// Measure tracks without ReplayGain while playing (GainPrefetcher).
+  bool fGainPrefetch = true;
+  /// Save gain measured while playing in the files, not just the library.
+  bool fGainWriteFiles = false;
+  BMenuItem *fGainPrefetchItem = nullptr;
+  BMenuItem *fGainWriteItem = nullptr;
+  BMessageRunner *fGainPrefetchRunner = nullptr;
   BMenuItem *fFastEditItem = nullptr;
 
   UndoManager *fUndoManager{nullptr};

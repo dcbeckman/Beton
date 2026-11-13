@@ -55,6 +55,9 @@
 #define MSG_REPEAT_TOGGLE 'rept'  ///< Toggle repeat mode.
 #define MSG_REPLAYGAIN_MODE 'rgmd' ///< Set ReplayGain playback "mode" (int32).
 #define MSG_ANALYZE_LOUDNESS 'rgan' ///< Measure and tag ReplayGain for the selected tracks.
+#define MSG_GAIN_PREFETCH_TICK 'rgpt' ///< Timer: hand the gain prefetcher the tracks to measure.
+#define MSG_GAIN_PREFETCH_TOGGLE 'rgpm' ///< Settings: measure tracks without gain while playing.
+#define MSG_GAIN_WRITE_TOGGLE 'rgpw' ///< Settings: save gain measured while playing in the files.
 #define MSG_LOUDNESS_PROGRESS 'rgap' ///< Analysis thread -> window: progress/results.
 ///@}
 
@@ -92,6 +95,7 @@
 #define MSG_TOGGLE_FAST_EDIT 'tgfe'       ///< Toggle inline cell editing.
 #define MSG_FILE_MOVE 'fmov'              ///< Request file move ("from"/"to" paths).
 #define MSG_FILE_MOVED 'fmvd'             ///< File moved on disk; rekey cache entry.
+#define MSG_FILE_MOVE_EXPECTED 'fmvx'     ///< Beton is about to move a file to "to": keep it in the library.
 #define MSG_UNDO 'undo'                   ///< Undo the last edit action.
 #define MSG_REDO 'redo'                   ///< Redo the last undone action.
 #define MSG_VIEWS_REFRESH 'vwrf'          ///< Debounced view refresh trigger.
@@ -229,6 +233,7 @@
 
 /** @name Audio CD Ripping */
 ///@{
+#define MSG_OPEN_IN_TRACKER 'sbOT'   ///< Sidebar menu: open the folder at "path" in Tracker.
 #define MSG_CD_RIP 'cdrp'            ///< Open the rip window ("path", "label" of the disc).
 #define MSG_CD_RIP_PROGRESS 'cdrP'   ///< Ripper -> window: "track", "tracks", "fraction", "title".
 #define MSG_CD_RIP_TRACK_DONE 'cdrT' ///< Ripper -> window: "track", "status", "path", "error".
@@ -241,6 +246,8 @@
 #define MSG_REMOVE_MISSING 'lbRM'    ///< File menu: remove tracks whose files are gone.
 #define MSG_PLAYLIST_SAVED 'plSv'    ///< A playlist was written; its "path"s join the library.
 #define MSG_LIBRARY_RESTORE 'lbRs'   ///< Undo of a removal: put the "path"s back; "then" messages go back to the window after.
+#define MSG_CD_EJECT 'cdej'          ///< Unmount and eject the disc ("path", "label"); "rip_window_done" once the rip window has let go of it.
+#define MSG_CD_EJECT_FAILED 'cdeX'   ///< Eject thread -> MainWindow: "text" to show in an alert.
 #define MSG_CD_RESCAN 'cdrR'         ///< Debounced: CD volumes or their files were renamed.
 #define MSG_CD_RIP_PLAY 'cdrY'       ///< Rip window -> MainWindow: play ripped files ("path", "title", "artist", "album", "track", "duration" each; "index" to start at).
 #define MSG_CD_RIP_STATUS 'cdrS'     ///< Ripper -> window: "text" for a step before ripping.

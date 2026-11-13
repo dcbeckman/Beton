@@ -22,6 +22,8 @@ SRCS = \
     library/MediaLibraryCache.cpp \
     library/LibraryMessageHandler.cpp \
     library/LibraryController.cpp \
+    library/GainPrefetcher.cpp \
+    library/GainStore.cpp \
     library/LibraryBrowserController.cpp \
     library/MediaLibraryScanner.cpp \
     library/MusicSourceSettings.cpp \

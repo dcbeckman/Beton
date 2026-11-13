@@ -60,6 +60,8 @@ public:
 
   const MediaItem *SelectedItem() const;
   const MediaItem *ItemAt(int32 index) const;
+  /** The items of the rows scrolled into view, top to bottom. */
+  void GetVisibleItems(std::vector<const MediaItem *> &out);
   bool HasPath(const BString &path) const;
   bool IsRowMissing(BRow *row) const;
 

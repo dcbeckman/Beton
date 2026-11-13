@@ -47,7 +47,9 @@ void CDRipSettings::Load() {
   pattern.Truncate(0);
   verify = true;
   addToLibrary = true;
+  giveUpPercent = -1;
   fDriveOffsets.MakeEmpty();
+  fOffsetCandidates.MakeEmpty();
 
   BPath path;
   if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
@@ -66,7 +68,12 @@ void CDRipSettings::Load() {
         verify = b;
       if (archive.FindBool("add_to_library", &b) == B_OK)
         addToLibrary = b;
+      int32 percent;
+      if (archive.FindInt32("give_up_percent", &percent) == B_OK &&
+          percent >= -1 && percent <= 10)
+        giveUpPercent = percent;
       archive.FindMessage("drive_offsets", &fDriveOffsets);
+      archive.FindMessage("offset_candidates", &fOffsetCandidates);
     }
   }
 
@@ -88,7 +95,9 @@ void CDRipSettings::Save() const {
   archive.AddString("pattern", pattern);
   archive.AddBool("verify", verify);
   archive.AddBool("add_to_library", addToLibrary);
+  archive.AddInt32("give_up_percent", giveUpPercent);
   archive.AddMessage("drive_offsets", &fDriveOffsets);
+  archive.AddMessage("offset_candidates", &fOffsetCandidates);
 
   BFile file(path.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
   if (file.InitCheck() == B_OK)
@@ -110,4 +119,37 @@ void CDRipSettings::SetDriveOffset(const BString &drive, int32 offset) {
 void CDRipSettings::ForgetDriveOffset(const BString &drive) {
   if (!drive.IsEmpty())
     fDriveOffsets.RemoveName(drive.String());
+}
+
+bool CDRipSettings::OffsetCandidate(const BString &drive, int32 &offset,
+                                    BString &disc) const {
+  BMessage entry;
+  if (drive.IsEmpty() ||
+      fOffsetCandidates.FindMessage(drive.String(), &entry) != B_OK)
+    return false;
+  // Both or nothing: Find() empties its argument when a field is missing.
+  int32 o;
+  BString d;
+  if (entry.FindInt32("offset", &o) != B_OK ||
+      entry.FindString("disc", &d) != B_OK)
+    return false;
+  offset = o;
+  disc = d;
+  return true;
+}
+
+void CDRipSettings::SetOffsetCandidate(const BString &drive, int32 offset,
+                                       const BString &disc) {
+  if (drive.IsEmpty())
+    return;
+  BMessage entry;
+  entry.AddInt32("offset", offset);
+  entry.AddString("disc", disc);
+  fOffsetCandidates.RemoveName(drive.String());
+  fOffsetCandidates.AddMessage(drive.String(), &entry);
+}
+
+void CDRipSettings::ForgetOffsetCandidate(const BString &drive) {
+  if (!drive.IsEmpty())
+    fOffsetCandidates.RemoveName(drive.String());
 }

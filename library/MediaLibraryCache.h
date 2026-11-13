@@ -3,6 +3,8 @@
 
 #include "MediaItem.h"
 #include "Messages.h"
+#include <Directory.h>
+#include <Entry.h>
 #include <Looper.h>
 #include <MessageRunner.h>
 #include <Messenger.h>
@@ -281,7 +283,25 @@ private:
    */
   bool _RereadBfsAttributes(MediaItem &item);
 
-  void _WatchDirRecursive(BDirectory &dir);
+  /** Watches every folder in the sidebar folders, so files added, removed
+   *  or moved there reach the library while Beton runs. */
+  void _WatchSidebarFolders();
+  /** Watches @p dir and the folders below it; adds the audio files found to
+   *  @p audioFiles when given. */
+  void _WatchDirTree(const BEntry &dir, std::vector<BString> *audioFiles);
+  /** Stops watching @p dir and the folders below it. */
+  void _UnwatchDirTree(const BEntry &dir);
+  /** Watches the audio files below @p dir for changes (the open folder). */
+  void _WatchFilesRecursive(BDirectory &dir);
+  void _WatchFile(const BEntry &file);
+  /** The path of folder @p dir, or false if it can't be found. */
+  static bool _DirPath(dev_t device, ino_t dir, BString &out);
+  /** The library key of the file @p name in folder @p dir (node @p node),
+   *  or an empty string if it isn't in the library. */
+  BString _FindEntryKey(dev_t device, ino_t dir, const char *name,
+                        ino_t node) const;
+  /** Moves a library entry to a new path, keeping what it knows. */
+  void _RekeyEntry(const BString &from, const BString &to);
   void _HandleNodeMonitor(BMessage *msg, int32 opcode);
   void _HandleEntryArrived(const entry_ref &ref);
   bool _IsWatched(const node_ref &nref) const;
@@ -336,7 +356,21 @@ private:
    */
   void _ProcessFileScanChunk();
 
-  std::vector<node_ref> fWatchedNodes;
+  /** Folders watched for files coming and going: every folder in the
+   *  sidebar folders, for as long as Beton runs. */
+  std::set<node_ref> fWatchedDirs;
+  /** Audio files watched for changes: only those in the open folder. */
+  std::set<node_ref> fWatchedFiles;
+  /** The folder open in the sidebar, or empty. */
+  BString fShownFolder;
+  /** Folders that couldn't be watched (the node monitor limit). */
+  int32 fWatchFailures = 0;
+  /** False until the window has sent the sidebar folders once. */
+  bool fSidebarFoldersKnown = false;
+  /** Where Beton is moving files itself (Move File To). A track moved out of
+   *  a sidebar folder that way stays in the library; moved any other way,
+   *  it leaves. */
+  std::set<BString> fExpectedMoves;
   /** @brief Armed one-shot save runner, or NULL when no save is pending. */
   BMessageRunner *fSaveThrottle{nullptr};
 
@@ -425,6 +459,9 @@ private:
   std::vector<BString> fPendingFileScans;
   /** @brief Sidebar playlist index each queued path came from. */
   std::vector<int32> fPendingFileScanPlaylists;
+  /** Queued paths to read again even though the library has them (a rip
+   *  writes tags and loudness after the file appears). */
+  std::set<BString> fRefreshPaths;
   /** @brief Read cursor into `fPendingFileScans`. */
   size_t fFileScanIndex{0};
   /** @brief True while chunks are being processed (a step message is in flight). */

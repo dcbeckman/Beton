@@ -2169,6 +2169,25 @@ const MediaItem *MediaTableView::ItemAt(int32 index) const {
   return nullptr;
 }
 
+void MediaTableView::GetVisibleItems(std::vector<const MediaItem *> &out) {
+  out.clear();
+  BView *outline = ScrollView();
+  if (outline == nullptr || CountRows() == 0)
+    return;
+  const BRect visible = outline->Bounds();
+  BRow *top = RowAt(BPoint(visible.left, visible.top));
+  if (top == nullptr)
+    return;
+  // Rows are all the same height, with a one-pixel gap between them.
+  const int32 first = IndexOf(top);
+  const float step = top->Height() + 1;
+  const int32 count = (int32)(visible.Height() / step) + 2;
+  for (int32 i = first; i >= 0 && i < first + count; i++) {
+    if (const MediaItem *item = ItemAt(i))
+      out.push_back(item);
+  }
+}
+
 /**
  * @brief Returns true if a row for @a path is in the view.
  */

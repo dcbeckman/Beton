@@ -1302,6 +1302,42 @@ static float _parseGainValue(const TagLib::PropertyMap &pm, const char *key) {
   return (float)v;
 }
 
+// MP4 keeps ReplayGain in iTunes freeform atoms, which TagLib 1.13's property
+// map doesn't translate: setProperties() drops REPLAYGAIN_* for MP4 and
+// properties() never returns them. So MP4 is read and written as atoms.
+static const char *kMp4Freeform = "----:com.apple.iTunes:";
+
+static const char *const kReplayGainKeys[] = {
+    "REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_ALBUM_GAIN",
+    "REPLAYGAIN_ALBUM_PEAK"};
+
+/** The ReplayGain key of freeform atom @p atom (any case), or empty. */
+static BString _mp4GainKey(const TagLib::String &atom) {
+  BString name(TL(atom));
+  const int32 prefix = (int32)strlen(kMp4Freeform);
+  if (name.Length() <= prefix || name.ICompare(kMp4Freeform, prefix) != 0)
+    return BString();
+  BString key(name.String() + prefix);
+  key.ToUpper();
+  for (const char *k : kReplayGainKeys) {
+    if (key == k)
+      return key;
+  }
+  return BString();
+}
+
+/** Adds an MP4 file's ReplayGain atoms to @p pm under their REPLAYGAIN_* keys. */
+static void _addMp4ReplayGain(TagLib::File *file, TagLib::PropertyMap &pm) {
+  auto *mp4 = dynamic_cast<TagLib::MP4::File *>(file);
+  if (mp4 == nullptr || !mp4->hasMP4Tag())
+    return;
+  for (const auto &item : mp4->tag()->itemMap()) {
+    BString key = _mp4GainKey(item.first);
+    if (!key.IsEmpty())
+      pm.replace(TLs(key), item.second.toStringList());
+  }
+}
+
 bool MetadataTagIO::ReadReplayGain(const BPath &path, ReplayGainInfo &out) {
   out = ReplayGainInfo();
   if (path.InitCheck() != B_OK)
@@ -1312,7 +1348,8 @@ bool MetadataTagIO::ReadReplayGain(const BPath &path, ReplayGainInfo &out) {
   if (fr.isNull() || !fr.file())
     return false;
 
-  const TagLib::PropertyMap pm = fr.file()->properties();
+  TagLib::PropertyMap pm = fr.file()->properties();
+  _addMp4ReplayGain(fr.file(), pm);
   out.trackGain = _parseGainValue(pm, "REPLAYGAIN_TRACK_GAIN");
   out.trackPeak = _parseGainValue(pm, "REPLAYGAIN_TRACK_PEAK");
   out.albumGain = _parseGainValue(pm, "REPLAYGAIN_ALBUM_GAIN");
@@ -1337,6 +1374,36 @@ bool MetadataTagIO::WriteReplayGain(const BPath &path, const ReplayGainInfo &in)
   if (fr.isNull() || !fr.file())
     return false;
 
+  if (auto *mp4 = dynamic_cast<TagLib::MP4::File *>(fr.file())) {
+    TagLib::MP4::Tag *tag = mp4->tag();
+    if (tag == nullptr)
+      return false;
+    auto setAtom = [tag](const char *key, float value, const char *format) {
+      if (std::isnan(value))
+        return;
+      // Replace whatever spelling is there (foobar2000 writes lower case).
+      std::vector<TagLib::String> old;
+      for (const auto &item : tag->itemMap()) {
+        if (_mp4GainKey(item.first) == key)
+          old.push_back(item.first);
+      }
+      for (const auto &name : old)
+        tag->removeItem(name);
+      BString atom(kMp4Freeform), lowerKey(key), text;
+      lowerKey.ToLower();
+      atom << lowerKey;
+      text.SetToFormat(format, (double)value);
+      tag->setItem(TLs(atom), TagLib::MP4::Item(TagLib::StringList(TLs(text))));
+    };
+    setAtom("REPLAYGAIN_TRACK_GAIN", in.trackGain, "%.2f dB");
+    setAtom("REPLAYGAIN_TRACK_PEAK", in.trackPeak, "%.6f");
+    setAtom("REPLAYGAIN_ALBUM_GAIN", in.albumGain, "%.2f dB");
+    setAtom("REPLAYGAIN_ALBUM_PEAK", in.albumPeak, "%.6f");
+    const bool ok = mp4->save();
+    DEBUG_PRINT("WriteReplayGain %s: %s\n", path.Path(), ok ? "OK" : "failed");
+    return ok;
+  }
+
   TagLib::PropertyMap pm = fr.file()->properties();
   auto setValue = [&pm](const char *key, float value, const char *format) {
     if (std::isnan(value))
@@ -1351,7 +1418,16 @@ bool MetadataTagIO::WriteReplayGain(const BPath &path, const ReplayGainInfo &in)
   setValue("REPLAYGAIN_ALBUM_GAIN", in.albumGain, "%.2f dB");
   setValue("REPLAYGAIN_ALBUM_PEAK", in.albumPeak, "%.6f");
 
-  fr.file()->setProperties(pm);
+  // A format whose tags have no place for ReplayGain hands the keys back;
+  // saving would then report a success that wrote nothing.
+  const TagLib::PropertyMap ignored = fr.file()->setProperties(pm);
+  for (const char *key : kReplayGainKeys) {
+    if (ignored.contains(TagLib::String(key, TagLib::String::UTF8))) {
+      DEBUG_PRINT("WriteReplayGain %s: format can't store %s\n", path.Path(),
+                  key);
+      return false;
+    }
+  }
   bool ok;
   // Save only the tag types the file already has, plus ID3v2 for the gain.
   // TagLib 1.13 creates an ID3v1 tag when told to save AllTags, even with

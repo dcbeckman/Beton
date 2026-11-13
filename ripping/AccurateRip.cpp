@@ -6,15 +6,20 @@
 #include <ByteOrder.h>
 #include <DataIO.h>
 #include <Drivers.h>
+#include <File.h>
+#include <FindDirectory.h>
 #include <Node.h>
+#include <Path.h>
 #include <Url.h>
 #include <UrlProtocolRoster.h>
 #include <fs_info.h>
 #include <private/netservices/HttpRequest.h>
 #include <private/netservices/HttpResult.h>
 
+#include <ctype.h>
 #include <fcntl.h>
 #include <memory>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,6 +31,144 @@ namespace {
 uint32 ReadLE32(const uint8 *p) {
   return (uint32)p[0] | ((uint32)p[1] << 8) | ((uint32)p[2] << 16) |
          ((uint32)p[3] << 24);
+}
+
+/**
+ * Downloads @p url into @p sink. Returns B_OK with the HTTP status in
+ * @p httpStatus (0 if no answer came), or an error with @p error set.
+ */
+status_t HttpGet(const BString &urlText, BMallocIO &sink, int32 &httpStatus,
+                 BString &error) {
+  httpStatus = 0;
+  try {
+#if B_HAIKU_VERSION <= B_HAIKU_VERSION_1_BETA_5
+    BUrl url(urlText.String());
+#else
+    BUrl url(urlText.String(), true);
+#endif
+    std::unique_ptr<BUrlRequest> request(
+        BUrlProtocolRoster::MakeRequest(url, &sink));
+    if (!request) {
+      error = "Could not create the request";
+      return B_ERROR;
+    }
+    if (auto http = dynamic_cast<BHttpRequest *>(request.get())) {
+      http->SetUserAgent("Beton");
+      http->SetFollowLocation(true);
+    }
+
+    thread_id thread = request->Run();
+    if (thread < 0) {
+      error = "Could not start the request";
+      return thread;
+    }
+    status_t exit;
+    if (wait_for_thread_etc(thread, B_RELATIVE_TIMEOUT, 20000000, &exit) !=
+        B_OK) {
+      request->Stop();
+      wait_for_thread_etc(thread, B_RELATIVE_TIMEOUT, 2000000, &exit);
+      error = "The AccurateRip server did not answer";
+      return B_TIMED_OUT;
+    }
+
+    const BHttpResult *result =
+        dynamic_cast<const BHttpResult *>(&request->Result());
+    httpStatus = result ? result->StatusCode() : 0;
+    DEBUG_PRINT("AccurateRip: %s -> HTTP %ld, %zu bytes\n", urlText.String(),
+                (long)httpStatus, (size_t)sink.BufferLength());
+    return B_OK;
+  } catch (...) {
+    error = "The AccurateRip lookup failed";
+    return B_ERROR;
+  }
+}
+
+/** Lower case, runs of spaces as one, no spaces at either end. */
+BString NormalizedName(const char *text, size_t length) {
+  BString out;
+  bool space = false;
+  for (size_t i = 0; i < length && text[i] != '\0'; i++) {
+    const char c = text[i];
+    if (isspace((unsigned char)c)) {
+      space = !out.IsEmpty();
+      continue;
+    }
+    if (space)
+      out << ' ';
+    space = false;
+    out << (char)tolower((unsigned char)c);
+  }
+  return out;
+}
+
+const char *kDriveListUrl =
+    "http://www.accuraterip.com/accuraterip/DriveOffsets.bin";
+const char *kDriveListFile = "Beton/DriveOffsets.bin";
+/** Each entry: offset (int16), "Vendor - Model" (33 bytes, NUL padded),
+ *  submissions (uint32 at byte 35), then fields Beton doesn't use. */
+const size_t kDriveRecord = 69;
+const bigtime_t kDriveListMaxAge = 30LL * 24 * 3600 * 1000000;
+
+/** The cached list, downloading it when missing or old. */
+status_t LoadDriveList(BMallocIO &list, BString &error) {
+  BPath path;
+  if (find_directory(B_USER_SETTINGS_DIRECTORY, &path, true) != B_OK) {
+    error = "No settings folder";
+    return B_ERROR;
+  }
+  path.Append(kDriveListFile);
+
+  BFile cached(path.Path(), B_READ_ONLY);
+  off_t size = 0;
+  time_t modified = 0;
+  const bool haveCache = cached.InitCheck() == B_OK &&
+                         cached.GetSize(&size) == B_OK && size > 0 &&
+                         size % kDriveRecord == 0 &&
+                         cached.GetModificationTime(&modified) == B_OK;
+  const bool fresh =
+      haveCache &&
+      (bigtime_t)(real_time_clock() - modified) * 1000000 < kDriveListMaxAge;
+
+  if (!fresh) {
+    BMallocIO download;
+    int32 http = 0;
+    BString fetchError;
+    if (HttpGet(kDriveListUrl, download, http, fetchError) == B_OK &&
+        http == 200 && download.BufferLength() > 0 &&
+        download.BufferLength() % kDriveRecord == 0) {
+      // Written beside the old copy and renamed, so a failed write never
+      // leaves half a list.
+      BString partial(path.Path());
+      partial << ".part";
+      BFile out(partial.String(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+      if (out.InitCheck() == B_OK &&
+          out.Write(download.Buffer(), download.BufferLength()) ==
+              (ssize_t)download.BufferLength()) {
+        out.Unset();
+        rename(partial.String(), path.Path());
+      } else {
+        unlink(partial.String());
+      }
+      list.Write(download.Buffer(), download.BufferLength());
+      return B_OK;
+    }
+    if (!haveCache) {
+      error = fetchError.IsEmpty()
+                  ? BString("The AccurateRip drive list could not be read")
+                  : fetchError;
+      return B_ERROR;
+    }
+    DEBUG_PRINT("AccurateRip: drive list not refreshed (%s); using the old "
+                "copy\n", fetchError.String());
+  }
+
+  std::vector<uint8> data((size_t)size);
+  if (cached.ReadAt(0, data.data(), data.size()) != (ssize_t)data.size()) {
+    error = "The saved AccurateRip drive list could not be read";
+    return B_IO_ERROR;
+  }
+  list.Write(data.data(), data.size());
+  return B_OK;
 }
 
 /** The standard freedb disc ID, for discs without a CD:cddbid attribute. */
@@ -96,6 +239,16 @@ int32 AccurateRip::Database::Match(size_t track, uint32 crc) const {
   return best;
 }
 
+int32 AccurateRip::Database::Match450(size_t track, uint32 crc) const {
+  int32 best = -1;
+  for (const Response &r : responses) {
+    if (track < r.frame450.size() && r.frame450[track] != 0 &&
+        r.frame450[track] == crc && (int32)r.confidence[track] > best)
+      best = r.confidence[track];
+  }
+  return best;
+}
+
 status_t AccurateRip::Parse(const void *data, size_t length, const DiscId &id,
                             Database &out) {
   out.responses.clear();
@@ -116,6 +269,7 @@ status_t AccurateRip::Parse(const void *data, size_t length, const DiscId &id,
       const uint8 *e = p + pos + 13 + t * 9;
       r.confidence.push_back(e[0]);
       r.crc.push_back(ReadLE32(e + 1));
+      r.frame450.push_back(ReadLE32(e + 5));
     }
     out.responses.push_back(r);
     pos = next;
@@ -130,62 +284,26 @@ status_t AccurateRip::Fetch(const DiscId &id, Database &out, BString &error) {
     return B_BAD_VALUE;
   }
 
-  try {
-    BMallocIO sink;
-#if B_HAIKU_VERSION <= B_HAIKU_VERSION_1_BETA_5
-    BUrl url(id.Url().String());
-#else
-    BUrl url(id.Url().String(), true);
-#endif
-    std::unique_ptr<BUrlRequest> request(
-        BUrlProtocolRoster::MakeRequest(url, &sink));
-    if (!request) {
-      error = "Could not create the request";
-      return B_ERROR;
-    }
-    if (auto http = dynamic_cast<BHttpRequest *>(request.get())) {
-      http->SetUserAgent("Beton");
-      http->SetFollowLocation(true);
-    }
-
-    thread_id thread = request->Run();
-    if (thread < 0) {
-      error = "Could not start the request";
-      return thread;
-    }
-    status_t exit;
-    if (wait_for_thread_etc(thread, B_RELATIVE_TIMEOUT, 20000000, &exit) !=
-        B_OK) {
-      request->Stop();
-      wait_for_thread_etc(thread, B_RELATIVE_TIMEOUT, 2000000, &exit);
-      error = "The AccurateRip server did not answer";
-      return B_TIMED_OUT;
-    }
-
-    const BHttpResult *result =
-        dynamic_cast<const BHttpResult *>(&request->Result());
-    const int32 status = result ? result->StatusCode() : 0;
-    DEBUG_PRINT("AccurateRip: %s -> HTTP %ld, %zu bytes\n", id.Url().String(),
-                (long)status, (size_t)sink.BufferLength());
-    if (status == 404)
-      return B_ENTRY_NOT_FOUND;
-    if (status != 200) {
-      if (status == 0)
-        error = "Could not reach the AccurateRip server";
-      else
-        error.SetToFormat("The AccurateRip server answered HTTP %ld",
-                          (long)status);
-      return B_ERROR;
-    }
-
-    status_t parsed = Parse(sink.Buffer(), sink.BufferLength(), id, out);
-    if (parsed == B_BAD_DATA)
-      error = "The AccurateRip answer could not be read";
-    return parsed;
-  } catch (...) {
-    error = "The AccurateRip lookup failed";
+  BMallocIO sink;
+  int32 status = 0;
+  status_t result = HttpGet(id.Url(), sink, status, error);
+  if (result != B_OK)
+    return result;
+  if (status == 404)
+    return B_ENTRY_NOT_FOUND;
+  if (status != 200) {
+    if (status == 0)
+      error = "Could not reach the AccurateRip server";
+    else
+      error.SetToFormat("The AccurateRip server answered HTTP %ld",
+                        (long)status);
     return B_ERROR;
   }
+
+  status_t parsed = Parse(sink.Buffer(), sink.BufferLength(), id, out);
+  if (parsed == B_BAD_DATA)
+    error = "The AccurateRip answer could not be read";
+  return parsed;
 }
 
 void AccurateRip::Checksum::Begin(uint32 frames, bool firstTrack,
@@ -246,6 +364,31 @@ bool AccurateRip::FindOffset(const uint32 *x, uint32 n, int32 range,
   return found;
 }
 
+void AccurateRip::FindOffset450(const uint32 *x, int32 range, size_t track,
+                                const Database &db,
+                                std::map<int32, int32> &matches) {
+  // The same sliding sum as FindOffset(), over one sector.
+  const uint32 n = 588;
+  auto frame = [&](int64 i) { return B_LENDIAN_TO_HOST_INT32(x[i]); };
+  uint32 s = 0, t = 0;
+  for (uint32 k = 1; k <= n; k++) {
+    s += k * frame(k - 1);
+    t += frame(k - 1);
+  }
+  matches.clear();
+  for (int32 o = -range; o <= range; o++) {
+    const int32 c = db.Match450(track, s);
+    if (c >= 0)
+      matches[o] = c;
+    if (o == range)
+      break;
+    const uint32 in = frame((int64)(o + range) + n);
+    const uint32 out = frame(o + range);
+    s = s - t + n * in;
+    t = t - out + in;
+  }
+}
+
 BString AccurateRip::DriveName(const BString &cdPath) {
   fs_info info;
   if (fs_stat_dev(dev_for_path(cdPath.String()), &info) != B_OK)
@@ -259,4 +402,59 @@ BString AccurateRip::DriveName(const BString &cdPath) {
   BString result(ok ? name : "");
   result.Trim();
   return result;
+}
+
+bool AccurateRip::DriveNameMatches(const BString &driveName,
+                                   const char *listName) {
+  // The list names a drive "Vendor - Model", each part as the drive reports
+  // it with its padding; the device name is "Vendor Model Revision".
+  const char *dash = strstr(listName, " - ");
+  BString key;
+  if (dash != nullptr) {
+    key = NormalizedName(listName, (size_t)(dash - listName));
+    const BString model = NormalizedName(dash + 3, strlen(dash + 3));
+    if (!key.IsEmpty() && !model.IsEmpty())
+      key << ' ';
+    key << model;
+  } else {
+    key = NormalizedName(listName, strlen(listName));
+  }
+  const BString name = NormalizedName(driveName.String(), driveName.Length());
+  if (key.IsEmpty() || name.IsEmpty())
+    return false;
+  if (name == key)
+    return true;
+  // What's left after the model may only be the firmware revision.
+  return name.StartsWith(key) && name[key.Length()] == ' ' &&
+         name.FindFirst(' ', key.Length() + 1) < 0;
+}
+
+status_t AccurateRip::ListedDriveOffset(const BString &driveName,
+                                        int32 &offset, int32 &submissions,
+                                        BString &error) {
+  if (driveName.IsEmpty())
+    return B_ENTRY_NOT_FOUND;
+  BMallocIO list;
+  status_t status = LoadDriveList(list, error);
+  if (status != B_OK)
+    return status;
+
+  // A drive can be listed more than once (one entry per firmware family);
+  // the entry with the most submissions wins.
+  const uint8 *p = static_cast<const uint8 *>(list.Buffer());
+  const size_t length = list.BufferLength();
+  bool found = false;
+  for (size_t at = 0; at + kDriveRecord <= length; at += kDriveRecord) {
+    char name[34] = {0};
+    memcpy(name, p + at + 2, 33);
+    if (!DriveNameMatches(driveName, name))
+      continue;
+    const int32 count = (int32)ReadLE32(p + at + 35);
+    if (found && count <= submissions)
+      continue;
+    offset = (int16)(p[at] | (p[at + 1] << 8));
+    submissions = count;
+    found = true;
+  }
+  return found ? B_OK : B_ENTRY_NOT_FOUND;
 }

@@ -9,6 +9,7 @@
 #include <vector>
 
 class BFilePanel;
+class GainPrefetcher;
 
 class MainWindow;
 
@@ -106,6 +107,13 @@ public:
    * @param msg MSG_LOUDNESS_PROGRESS with "path" and rg* floats.
    */
   void HandleLoudnessResult(BMessage* msg);
+
+  /**
+   * @brief Tells the GainPrefetcher which tracks to measure: while local
+   *        music plays, the next track and the rows on screen that have no
+   *        track gain. Called on a timer and when the setting changes.
+   */
+  void UpdateGainPrefetch();
 
   /**
    * @brief Handles initial cache-load completion and refreshes views.
@@ -212,6 +220,11 @@ private:
 
   /** True while an AnalyzeLoudness() thread is running. */
   std::atomic<bool> fLoudnessRunning{false};
+
+  /** Measures gain in the background; created when first needed. */
+  GainPrefetcher *fGainPrefetcher = nullptr;
+  /** Top visible row at the last gain prefetch tick, to see scrolling. */
+  BString fGainVisibleTop;
 
   /**
    * @brief Scans every configured source, sidebar folder and saved playlist.

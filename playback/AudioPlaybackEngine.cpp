@@ -1,6 +1,7 @@
 #include "AudioPlaybackEngine.h"
 #include "DLNAService.h"
 #include "Debug.h"
+#include "GainStore.h"
 #include "LocalFileHttpServer.h"
 #include "Messages.h"
 #include "MetadataTagIO.h"
@@ -1148,8 +1149,20 @@ void AudioPlaybackEngine::_UpdateReplayGain(size_t index) {
   const int32 mode = fReplayGainMode.load();
 
   ReplayGainInfo rg;
-  if (mode != kReplayGainOff && index < fQueue.size() &&
-      MetadataTagIO::ReadReplayGain(BPath(fQueue[index].c_str()), rg)) {
+  bool found = false;
+  if (mode != kReplayGainOff && index < fQueue.size()) {
+    const char *path = fQueue[index].c_str();
+    found = MetadataTagIO::ReadReplayGain(BPath(path), rg);
+    // A gain Beton measured but kept in the library, not in the file.
+    ReplayGainInfo stored;
+    if (!rg.HasTrack() && GainStore::Get(BString(path), stored) &&
+        stored.HasTrack()) {
+      rg.trackGain = stored.trackGain;
+      rg.trackPeak = stored.trackPeak;
+      found = true;
+    }
+  }
+  if (found) {
     bool album = false;
     if (mode == kReplayGainAlbum)
       album = rg.HasAlbum();

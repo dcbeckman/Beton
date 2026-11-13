@@ -1,4 +1,7 @@
 #include "LibraryController.h"
+#include "AudioPlaybackEngine.h"
+#include "GainPrefetcher.h"
+#include "GainStore.h"
 #include "LoudnessAnalyzer.h"
 #include "MainWindow.h"
 #include "MetadataPropertiesWindow.h"
@@ -7,6 +10,7 @@
 #include "MediaLibraryCache.h"
 #include "Debug.h"
 #include "Messages.h"
+#include "PlaybackQueueManager.h"
 #include "PlaylistLibrary.h"
 #include "PlaylistSidebarView.h"
 #include "MediaTableView.h"
@@ -29,7 +33,9 @@
 #include <TextView.h>
 #include <Volume.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -42,6 +48,8 @@ LibraryController::LibraryController(MainWindow* window) : fWindow(window) {}
 LibraryController::~LibraryController() {
   _StopScanStatusTimer();
   delete fAddPanel;
+  // Its thread has ended: the window waits for launched threads first.
+  delete fGainPrefetcher;
 }
 
 /**
@@ -94,7 +102,15 @@ void LibraryController::ImportRippedFiles(BMessage *msg) {
   if (!fWindow->fMediaLibraryCache)
     return;
 
+  // Read the files even if the library has them: a rip into a sidebar folder
+  // is picked up as each file appears, before its loudness (and a WAV's tags
+  // and attributes) are written. Without "Add tracks to library" only those
+  // already picked up that way are read again.
+  const bool add = msg->GetBool("add", true);
   BMessage scan(MSG_SCAN_FILES);
+  scan.AddBool("refresh", true);
+  if (!add)
+    scan.AddBool("known_only", true);
   int32 queued = 0;
   BString path;
   for (int32 i = 0; msg->FindString("path", i, &path) == B_OK; i++) {
@@ -103,8 +119,8 @@ void LibraryController::ImportRippedFiles(BMessage *msg) {
     queued++;
   }
 
-  DEBUG_PRINT("CD rip: adding %ld ripped files to the library\n",
-              (long)queued);
+  DEBUG_PRINT("CD rip: %s %ld ripped files\n",
+              add ? "adding" : "refreshing", (long)queued);
   if (queued > 0)
     BMessenger(fWindow->fMediaLibraryCache).SendMessage(&scan);
 }
@@ -451,6 +467,25 @@ void SendStatus(const BMessenger &target, const BString &text) {
   target.SendMessage(&status);
 }
 
+/** Loudness workers, at most; more mostly makes disks seek. */
+const size_t kMaxLoudnessWorkers = 8;
+
+/** Copies a library item's gain to the GainStore playback reads. */
+void SyncGainStore(const MediaItem &mi) {
+  ReplayGainInfo gain;
+  gain.trackGain = mi.rgTrackGain;
+  gain.trackPeak = mi.rgTrackPeak;
+  gain.albumGain = mi.rgAlbumGain;
+  gain.albumPeak = mi.rgAlbumPeak;
+  GainStore::Set(mi.path, gain);
+}
+
+/** Thread entry that runs a std::function<void()>. */
+int32 RunFunction(void *data) {
+  (*static_cast<std::function<void()> *>(data))();
+  return 0;
+}
+
 } // namespace
 
 void LibraryController::AnalyzeLoudness(BMessage *msg) {
@@ -494,7 +529,7 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
   fWindow->LaunchThread("loudness_analysis", [paths, target, shuttingDown,
                                               running, report]() {
     // Group by folder and album tag: album gain needs the whole album.
-    std::map<BString, std::vector<size_t>> albums;
+    std::map<BString, std::vector<size_t>> albumMap;
     std::vector<BString> albumNames(paths.size());
     for (size_t i = 0; i < paths.size(); i++) {
       TagData td;
@@ -505,22 +540,30 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
       BString key(parent.Path());
       // Untitled files never form an album with each other.
       key << '\n' << (td.album.IsEmpty() ? paths[i] : td.album);
-      albums[key].push_back(i);
+      albumMap[key].push_back(i);
     }
+    std::vector<std::vector<size_t>> albums;
+    albums.reserve(albumMap.size());
+    for (auto &entry : albumMap)
+      albums.push_back(std::move(entry.second));
 
-    size_t done = 0, failed = 0, albumsTagged = 0, partialAlbums = 0;
-    BString text;
-    for (const auto &[key, members] : albums) {
+    std::atomic<size_t> nextAlbum(0), started(0), doneCount(0),
+        failedCount(0), albumsTaggedCount(0), partialAlbumsCount(0);
+
+    // Measures one album's files, then writes album gain if the selection
+    // held the whole album.
+    auto measureAlbum = [&](const std::vector<size_t> &members) {
       std::vector<double> blocks;
       double peak = 0;
       std::vector<BString> measured;
 
       for (size_t index : members) {
         if (shuttingDown->load())
-          break;
+          return;
         const BString &path = paths[index];
+        BString text;
         text.SetToFormat(B_TRANSLATE("Analyzing loudness: %zu of %zu, %s"),
-                         done + failed + 1, paths.size(),
+                         started.fetch_add(1) + 1, paths.size(),
                          BPath(path.String()).Leaf());
         SendStatus(target, text);
 
@@ -529,10 +572,10 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
         status_t status =
             LoudnessAnalyzer::AnalyzeFile(path.String(), shuttingDown, meter, error);
         if (status == B_CANCELED)
-          break;
+          return;
         if (status != B_OK || !std::isfinite(meter->Loudness())) {
           DEBUG_PRINT("Loudness: %s: %s\n", path.String(), error.String());
-          failed++;
+          failedCount++;
           continue;
         }
 
@@ -541,26 +584,24 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
         gain.trackPeak = (float)meter->Peak();
         if (MetadataTagIO::WriteReplayGain(BPath(path.String()), gain)) {
           report(path, gain);
-          done++;
+          doneCount++;
           measured.push_back(path);
           blocks.insert(blocks.end(), meter->Blocks().begin(),
                         meter->Blocks().end());
           peak = std::max(peak, meter->Peak());
         } else {
-          failed++;
+          failedCount++;
         }
       }
-      if (shuttingDown->load())
-        break;
 
       const BString &album = albumNames[members.front()];
       if (album.IsEmpty() || measured.size() != members.size())
-        continue;
+        return;
       BPath parent;
       BPath(measured.front().String()).GetParent(&parent);
       if (CountAlbumFiles(parent.Path(), album) != members.size()) {
-        partialAlbums++;
-        continue;
+        partialAlbumsCount++;
+        return;
       }
 
       ReplayGainInfo gain;
@@ -571,8 +612,46 @@ void LibraryController::AnalyzeLoudness(BMessage *msg) {
         if (MetadataTagIO::WriteReplayGain(BPath(path.String()), gain))
           report(path, gain);
       }
-      albumsTagged++;
+      albumsTaggedCount++;
+    };
+
+    // Albums are measured in parallel, one worker per core. Workers run below
+    // normal priority so playback and the window stay responsive on a slow
+    // machine. TagLib calls are serialised by TagLibLock(); decoding is not.
+    std::function<void()> work = [&]() {
+      for (;;) {
+        const size_t a = nextAlbum.fetch_add(1);
+        if (a >= albums.size() || shuttingDown->load())
+          return;
+        measureAlbum(albums[a]);
+      }
+    };
+
+    system_info info;
+    size_t cpus = get_system_info(&info) == B_OK ? info.cpu_count : 1;
+    size_t workerCount =
+        std::min(std::max<size_t>(cpus, 1),
+                 std::min(albums.size(), kMaxLoudnessWorkers));
+    std::vector<thread_id> workers;
+    for (size_t i = 0; i < workerCount; i++) {
+      thread_id t = spawn_thread(RunFunction, "loudness_worker",
+                                 B_LOW_PRIORITY, &work);
+      if (t < 0)
+        break;
+      workers.push_back(t);
+      resume_thread(t);
     }
+    if (workers.empty())
+      work();
+    for (thread_id t : workers) {
+      status_t exitValue;
+      wait_for_thread(t, &exitValue);
+    }
+
+    const size_t done = doneCount.load(), failed = failedCount.load(),
+                 albumsTagged = albumsTaggedCount.load(),
+                 partialAlbums = partialAlbumsCount.load();
+    BString text;
 
     if (shuttingDown->load()) {
       running->store(false);
@@ -617,6 +696,68 @@ void LibraryController::HandleLoudnessResult(BMessage *msg) {
   BMessenger(fWindow->fMediaLibraryCache).SendMessage(&update);
 }
 
+void LibraryController::UpdateGainPrefetch() {
+  AudioPlaybackEngine *engine = fWindow->fPlaybackEngine;
+  const bool active =
+      fWindow->fGainPrefetch && engine != nullptr && engine->IsPlaying() &&
+      !engine->IsStreaming() &&
+      engine->ReplayGainModeValue() != AudioPlaybackEngine::kReplayGainOff &&
+      !fLoudnessRunning.load();
+  if (!active) {
+    if (fGainPrefetcher != nullptr)
+      fGainPrefetcher->SetWanted({});
+    return;
+  }
+
+  if (fGainPrefetcher == nullptr) {
+    fGainPrefetcher =
+        new GainPrefetcher(BMessenger(fWindow), &fWindow->fShuttingDown);
+    GainPrefetcher *prefetcher = fGainPrefetcher;
+    fWindow->LaunchThread("gain_prefetch",
+                          [prefetcher]() { prefetcher->Run(); });
+  }
+
+  // Library tracks without a track gain: the next track first, since the
+  // listener hears it soonest, then the current one (for next time), then
+  // the rows on screen, which the listener may skip to.
+  std::vector<BString> wanted;
+  std::set<BString> seen;
+  auto want = [&](const BString &path) {
+    auto it = fWindow->fPathIndex.find(path);
+    if (it == fWindow->fPathIndex.end() || !seen.insert(path).second)
+      return;
+    const MediaItem &mi = fWindow->fAllItems[it->second];
+    if (mi.HasTrackGain() || mi.missing || !IsAudioFileName(path.String()))
+      return;
+    wanted.push_back(path);
+  };
+
+  const BString current = engine->QueuePathAt(engine->CurrentIndex());
+  if (fWindow->fPlaybackQueueManager != nullptr)
+    want(engine->QueuePathAt(fWindow->fPlaybackQueueManager->PeekNextIndex()));
+  want(current);
+  const size_t priority = wanted.size();
+
+  // Rows on screen only once the list has stayed put for a tick, so
+  // scrolling through the library doesn't queue rows it only flew past.
+  MediaTableView *cv =
+      fWindow->fLibraryManager ? fWindow->fLibraryManager->ContentView() : nullptr;
+  std::vector<const MediaItem *> visible;
+  if (cv != nullptr)
+    cv->GetVisibleItems(visible);
+  const BString top = visible.empty() ? BString() : visible.front()->path;
+  const bool settled = top == fGainVisibleTop;
+  fGainVisibleTop = top;
+  if (settled) {
+    for (const MediaItem *mi : visible)
+      want(mi->path);
+  }
+
+  fGainPrefetcher->SetPlayingPath(current);
+  fGainPrefetcher->SetWriteToFiles(fWindow->fGainWriteFiles);
+  fGainPrefetcher->SetWanted(wanted, priority);
+}
+
 /**
  * @brief Moves a file on disk and updates library state on success.
  */
@@ -656,6 +797,15 @@ void LibraryController::HandleFileMove(BMessage *msg) {
 
   BPath originalPath;
   entry.GetPath(&originalPath);
+
+  // Tell the cache first, so it reads this before the folder watch reports
+  // the move: a track Beton moves out of a sidebar folder stays in the
+  // library, where one moved out in Tracker leaves it.
+  if (fWindow->fMediaLibraryCache) {
+    BMessage expected(MSG_FILE_MOVE_EXPECTED);
+    expected.AddString("to", toPath.Path());
+    fWindow->fMediaLibraryCache->PostMessage(&expected);
+  }
 
   status_t st = entry.MoveTo(&dir, toPath.Leaf(), false);
   if (st != B_OK) {
@@ -710,6 +860,8 @@ void LibraryController::HandleFileMove(BMessage *msg) {
     fWindow->fPathIndex.erase(mapIt);
     fWindow->fAllItems[idx].path = newPath;
     fWindow->fPathIndex[newPath] = idx;
+    GainStore::Remove(from);
+    SyncGainStore(fWindow->fAllItems[idx]);
     if (cv)
       cv->UpdateItem(fWindow->fAllItems[idx], &from);
   } else if (cv) {
@@ -787,11 +939,34 @@ void LibraryController::HandleFileMoved(BMessage *msg) {
   // Beton's own moves were already applied by HandleFileMove, so for those
   // nothing below matches |from| any more and this is a no-op.
   auto mapIt = fWindow->fPathIndex.find(from);
-  if (mapIt != fWindow->fPathIndex.end()) {
+  MediaTableView *view = fWindow->fLibraryManager
+                             ? fWindow->fLibraryManager->ContentView()
+                             : nullptr;
+  if (mapIt != fWindow->fPathIndex.end() &&
+      MediaLibraryCache::IsInTrash(to)) {
+    // Moved to the Trash outside Beton: it leaves the library view, as when
+    // Beton trashes it (the cache keeps it until the Trash is emptied).
+    fWindow->fAllItems.erase(fWindow->fAllItems.begin() + mapIt->second);
+    RebuildPathIndex();
+    if (view && !fWindow->fIsFolderMode && !fWindow->IsPlaylistSelected()) {
+      for (int32 i = 0; i < view->CountRows(); ++i) {
+        const MediaItem *mi = view->ItemAt(i);
+        if (mi && mi->path == from) {
+          BRow *r = view->RowAt(i);
+          view->RemoveRow(r);
+          delete r;
+          break;
+        }
+      }
+      return;
+    }
+  } else if (mapIt != fWindow->fPathIndex.end()) {
     size_t idx = mapIt->second;
     fWindow->fPathIndex.erase(mapIt);
     fWindow->fAllItems[idx].path = to;
     fWindow->fPathIndex[to] = idx;
+    GainStore::Remove(from);
+    SyncGainStore(fWindow->fAllItems[idx]);
   }
 
   MediaTableView *cv =
@@ -835,6 +1010,8 @@ void LibraryController::HandleCacheLoaded() {
     auto entries = fWindow->fMediaLibraryCache->AllEntries();
     bigtime_t tc1 = system_time();
     fWindow->fAllItems = std::move(entries);
+    for (const MediaItem &mi : fWindow->fAllItems)
+      SyncGainStore(mi);
 
     RebuildPathIndex();
     bigtime_t tc2 = system_time();
@@ -1238,6 +1415,8 @@ void LibraryController::HandleScanDone(BMessage *msg) {
   if (fWindow->fMediaLibraryCache) {
     auto entries = fWindow->fMediaLibraryCache->AllEntries();
     fWindow->fAllItems = std::move(entries);
+    for (const MediaItem &mi : fWindow->fAllItems)
+      SyncGainStore(mi);
 
     RebuildPathIndex();
   }
@@ -1335,6 +1514,7 @@ void LibraryController::HandleMediaBatch(BMessage *msg) {
       if (msg->FindInt32("duration", i, &val) == B_OK)
         itemToUpdate->duration = val;
       itemToUpdate->ReadGainFields(*msg, i);
+      SyncGainStore(*itemToUpdate);
 
       MediaTableView *cv =
           fWindow->fLibraryManager ? fWindow->fLibraryManager->ContentView() : nullptr;
@@ -1466,6 +1646,7 @@ void LibraryController::HandleMediaItemFound(BMessage *msg) {
   if (msg->FindInt32("bitrate", &val) == B_OK)
     itemToUpdate->bitrate = val;
   itemToUpdate->ReadGainFields(*msg);
+  SyncGainStore(*itemToUpdate);
 
   if (fWindow->fLibraryManager) {
     fWindow->fLibraryManager->UpdateActiveItem(*itemToUpdate);

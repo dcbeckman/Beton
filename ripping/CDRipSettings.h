@@ -28,6 +28,9 @@ struct CDRipSettings {
   /** Add ripped tracks to the library, adding the save folder to the
    *  library's folders if it isn't in one already. */
   bool addToLibrary = true;
+  /** Give up on a track once more than this percentage of its sectors are
+   *  unreadable: 0 (the first one) to 10. -1: never, only Skip track. */
+  int32 giveUpPercent = -1;
 
   /**
    * @brief The remembered read offset of a drive.
@@ -37,6 +40,17 @@ struct CDRipSettings {
   bool DriveOffset(const BString &drive, int32 &offset) const;
   void SetDriveOffset(const BString &drive, int32 offset);
   void ForgetDriveOffset(const BString &drive);
+
+  /**
+   * @brief An offset one disc found for a drive, waiting for a second disc
+   *        to agree before it is kept as the drive's offset.
+   * @param disc Identifies the disc that found it (AccurateRip disc ID).
+   */
+  bool OffsetCandidate(const BString &drive, int32 &offset,
+                       BString &disc) const;
+  void SetOffsetCandidate(const BString &drive, int32 offset,
+                          const BString &disc);
+  void ForgetOffsetCandidate(const BString &drive);
 
   /** Loads saved settings, filling anything missing with defaults. */
   void Load();
@@ -50,6 +64,8 @@ struct CDRipSettings {
 
 private:
   BMessage fDriveOffsets; ///< Drive name -> int32 read offset in samples.
+  /** Drive name -> message with "offset" (int32) and "disc" (string). */
+  BMessage fOffsetCandidates;
 };
 
 #endif // BETON_CD_RIP_SETTINGS_H

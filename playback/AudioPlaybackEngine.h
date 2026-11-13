@@ -14,6 +14,7 @@
 #include <MediaTrack.h>
 #include <MessageRunner.h>
 #include <Messenger.h>
+#include <String.h>
 #include <SoundPlayer.h>
 #include <Url.h>
 #include <UrlContext.h>
@@ -184,6 +185,12 @@ public:
   ///@{
   void SetQueue(const std::vector<std::string> &queue);
   int32 QueueSize() const { return static_cast<int32>(fQueue.size()); }
+  /** Path of queue entry @p index, or empty. */
+  BString QueuePathAt(int32 index) const {
+    return index >= 0 && (size_t)index < fQueue.size()
+               ? BString(fQueue[index].c_str())
+               : BString();
+  }
   ///@}
 
   /** @name Time Info */

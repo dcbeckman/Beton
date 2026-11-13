@@ -611,6 +611,8 @@ MainWindow::~MainWindow() {
   fShuttingDown.store(true, std::memory_order_relaxed);
   delete fCDRescanRunner;
   fCDRescanRunner = nullptr;
+  delete fGainPrefetchRunner;
+  fGainPrefetchRunner = nullptr;
   if (fRadioStationController)
     fRadioStationController->CancelQueuedPlay();
   if (fPlaybackEngine)
@@ -778,7 +780,6 @@ void MainWindow::_BuildUI() {
 
   // Values are AudioPlaybackEngine::ReplayGainMode.
   fReplayGainMenu = new BMenu(B_TRANSLATE("ReplayGain"));
-  fReplayGainMenu->SetRadioMode(true);
   const struct {
     int32 mode;
     const char *label;
@@ -796,6 +797,17 @@ void MainWindow::_BuildUI() {
     item->SetMarked(m.mode == AudioPlaybackEngine::kReplayGainAuto);
     fReplayGainMenu->AddItem(item);
   }
+  fReplayGainMenu->AddSeparatorItem();
+  fGainPrefetchItem =
+      new BMenuItem(B_TRANSLATE("Measure tracks without gain while playing"),
+                    new BMessage(MSG_GAIN_PREFETCH_TOGGLE));
+  fGainPrefetchItem->SetMarked(fGainPrefetch);
+  fReplayGainMenu->AddItem(fGainPrefetchItem);
+  fGainWriteItem =
+      new BMenuItem(B_TRANSLATE("Save measured gain in the files"),
+                    new BMessage(MSG_GAIN_WRITE_TOGGLE));
+  fGainWriteItem->SetMarked(fGainWriteFiles);
+  fReplayGainMenu->AddItem(fGainWriteItem);
   fSettingsMenu->AddItem(fReplayGainMenu);
   fSettingsMenu->AddSeparatorItem();
 
@@ -1438,10 +1450,11 @@ void MainWindow::SetReplayGainMode(int32 mode) {
   if (fReplayGainMenu == nullptr)
     return;
   for (int32 i = 0; BMenuItem *item = fReplayGainMenu->ItemAt(i); i++) {
-    int32 itemMode = -1;
-    if (item->Message() != nullptr)
-      item->Message()->FindInt32("mode", &itemMode);
-    item->SetMarked(itemMode == mode);
+    // The mode items; the menu also holds the measuring check items.
+    int32 itemMode;
+    if (item->Message() != nullptr &&
+        item->Message()->FindInt32("mode", &itemMode) == B_OK)
+      item->SetMarked(itemMode == mode);
   }
 }
 
@@ -1556,6 +1569,13 @@ void MainWindow::_SendSidebarFolders() {
 }
 
 void MainWindow::_InitCDVolumeMonitoring() {
+  // Also starts the gain prefetcher's timer: it looks for tracks to measure
+  // every two seconds, which follows track changes and scrolling closely
+  // enough without watching for either.
+  BMessage tick(MSG_GAIN_PREFETCH_TICK);
+  fGainPrefetchRunner =
+      new BMessageRunner(BMessenger(this), &tick, 2000000);
+
   fVolumeRoster.StartWatching(BMessenger(this));
   // Mount points live in "/"; renaming a volume renames its mount point.
   BEntry root("/");

@@ -14,6 +14,7 @@
 #include <MenuItem.h>
 #include <Path.h>
 #include <Resources.h>
+#include <Roster.h>
 #include <String.h>
 #include <TextControl.h>
 #include <MimeType.h>
@@ -273,8 +274,32 @@ void PlaylistSidebarView::MessageReceived(BMessage *msg) {
     break;
 
   case MSG_CD_RIP:
+  case MSG_CD_EJECT:
     fTarget.SendMessage(msg);
     break;
+
+  case MSG_OPEN_IN_TRACKER: {
+    BString path;
+    entry_ref ref;
+    if (msg->FindString("path", &path) != B_OK || path.IsEmpty() ||
+        get_ref_for_path(path.String(), &ref) != B_OK ||
+        !BEntry(&ref, true).IsDirectory()) {
+      BString text;
+      text.SetToFormat(B_TRANSLATE("The folder \"%s\" can't be found."),
+                       path.String());
+      (new BAlert(B_TRANSLATE("Open in Tracker"), text.String(),
+                  B_TRANSLATE("OK"), nullptr, nullptr, B_WIDTH_AS_USUAL,
+                  B_WARNING_ALERT))
+          ->Go(nullptr);
+      break;
+    }
+    // Tracker is the preferred app for folders.
+    status_t st = be_roster->Launch(&ref);
+    if (st != B_OK && st != B_ALREADY_RUNNING)
+      DEBUG_PRINT("Open in Tracker failed for %s: %s\n", path.String(),
+                  strerror(st));
+    break;
+  }
 
   default:
     SingleColumnListView::MessageReceived(msg);
@@ -331,6 +356,12 @@ void PlaylistSidebarView::MouseDown(BPoint where) {
                                           new BMessage(MSG_DELETE_PLAYLIST)));
     } else if ((size_t)index < fRows.size() &&
                fRows[index].kind == PlaylistItemKind::Folder) {
+      BMessage *open = new BMessage(MSG_OPEN_IN_TRACKER);
+      open->AddString("path", fManager ? fManager->FolderPathForName(clickedName)
+                                       : PathAt(index));
+      fContextMenu->AddItem(
+          new BMenuItem(B_TRANSLATE("Open in Tracker"), open));
+      fContextMenu->AddSeparatorItem();
       fContextMenu->AddItem(new BMenuItem(B_TRANSLATE("Remove"),
                                           new BMessage(MSG_DELETE_PLAYLIST)));
     } else if (KindAt(index) == PlaylistItemKind::CD) {
@@ -339,6 +370,10 @@ void PlaylistSidebarView::MouseDown(BPoint where) {
       rip->AddString("label", ItemAt(index));
       fContextMenu->AddItem(
           new BMenuItem(B_TRANSLATE("Rip CD" B_UTF8_ELLIPSIS), rip));
+      BMessage *eject = new BMessage(MSG_CD_EJECT);
+      eject->AddString("path", PathAt(index));
+      eject->AddString("label", ItemAt(index));
+      fContextMenu->AddItem(new BMenuItem(B_TRANSLATE("Eject Disc"), eject));
     }
 
     if (fContextMenu->CountItems() > 0) {

@@ -87,9 +87,17 @@ public:
    */
   const MediaItem *QueueItemForPath(const BString &path) const;
 
+  /**
+   * @brief Queue index of the local track that will play after the current
+   *        one, or -1. With shuffle on, this picks the next track now.
+   */
+  int32 PeekNextIndex();
+
 private:
   /** @brief Returns random queue index in range `[0, count)`. */
   int32 _RandomIndex(int32 count);
+  /** @brief The shuffle pick PeekNextIndex() made, else a random index. */
+  int32 _TakeShuffleNext(int32 count);
   /** @brief Updates shuffle button icon to current shuffle state. */
   void _UpdateShuffleIcon();
   /** @brief Updates repeat button icon to current repeat state. */
@@ -120,6 +128,9 @@ private:
   
   /** @brief Stack-like history for shuffle previous navigation. */
   std::vector<int32> fShuffleHistory;
+
+  /** @brief Next shuffle pick made ahead by PeekNextIndex(); -1 = none. */
+  int32 fShuffleNext = -1;
 
   /** @brief Queued tracks the library index does not know, by path. */
   std::map<BString, MediaItem> fQueueItems;
