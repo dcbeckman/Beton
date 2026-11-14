@@ -32,6 +32,8 @@ static AudioPlaybackEngine *sMidiHookController = nullptr;
 static void EmptyMidiFileHook(int32) {}
 
 static constexpr bigtime_t kAudioFadeDurationUs = 80000;
+/** The sound player's name, which the system mixer shows. */
+static const char *kMixerName = "Beton";
 
 static int64 FadeFrameCount(const media_raw_audio_format &format) {
   if (format.frame_rate <= 0)
@@ -418,7 +420,10 @@ void AudioPlaybackEngine::_ApplyFade(void *buffer, size_t size,
 #endif
 
   const float replayGain = fReplayGain.load(std::memory_order_relaxed);
-  if (fadeIn <= 0 && fadeOut <= 0 && !needSoftwareVolume && replayGain == 1.0f)
+  const float replayGainFrom = fAppliedReplayGain;
+  fAppliedReplayGain = replayGain;
+  if (fadeIn <= 0 && fadeOut <= 0 && !needSoftwareVolume &&
+      replayGain == 1.0f && replayGainFrom == 1.0f)
     return;
 
   auto gainForFrame = [&](int64 frame) {
@@ -439,7 +444,11 @@ void AudioPlaybackEngine::_ApplyFade(void *buffer, size_t size,
     if (gain > 1.0f)
       gain = 1.0f;
     // ReplayGain may lift a quiet track above unity; it was limited to the
-    // track's peak when it was set, so it does not clip.
+    // track's peak when it was set, so it does not clip. A new value glides
+    // in over this buffer.
+    if (replayGainFrom != replayGain && frames > 0)
+      return gain * (replayGainFrom + (replayGain - replayGainFrom) *
+                                          (float)(frame + 1) / frames);
     return gain * replayGain;
   };
 
@@ -981,7 +990,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
       // the negotiated format ourselves (see the resampler setup below).
       media_multi_audio_format format = media_multi_audio_format::wildcard;
 
-      fPlayer = new BSoundPlayer(node, &format, "Orchester", &input, &_PlayBuffer, NULL, this);
+      fPlayer = new BSoundPlayer(node, &format, kMixerName, &input, &_PlayBuffer, NULL, this);
 
       if (fPlayer && fPlayer->InitCheck() == B_OK) {
         // The decoder emits the file's NATIVE format (raf, from DecodedFormat
@@ -998,7 +1007,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
           delete fPlayer;
           fPlayer = nullptr;
           fLocalOutputManager.Release();
-          fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+          fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
         } else {
           // Pre-size the source scratch for one device buffer so the audio
           // callback never allocates: worst-case source frames per callback.
@@ -1032,7 +1041,7 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
           errMsg.AddString("text", "Device unavailable, falling back to system default");
           fTarget.SendMessage(&errMsg);
         }
-        fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+        fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
       }
     } else {
       DEBUG_PRINT("Acquire device failed, falling back to default mixer\n");
@@ -1043,13 +1052,13 @@ void AudioPlaybackEngine::Play(size_t trackIndex) {
         errMsg.AddString("text", "Device in use, falling back to system default");
         fTarget.SendMessage(&errMsg);
       }
-      fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+      fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
     }
   } else {
-    fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+    fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
   }
 #else
-  fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+  fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
 #endif
 
   if (!fPlayer || fPlayer->InitCheck() != B_OK) {
@@ -1124,6 +1133,14 @@ void AudioPlaybackEngine::SetReplayGainMode(int32 mode) {
   // Takes effect from the next track; re-evaluate the current one now.
   if (fCurrentIdx < fQueue.size() && !fIsStreaming.load())
     _UpdateReplayGain(fCurrentIdx);
+}
+
+void AudioPlaybackEngine::RefreshReplayGain(const BString &path) {
+  const size_t index = fCurrentIdx;
+  if (fIsStreaming.load() || index >= fQueue.size() ||
+      path != fQueue[index].c_str())
+    return;
+  _UpdateReplayGain(index);
 }
 
 bool AudioPlaybackEngine::_IsPlayedInAlbumOrder(size_t index) {
@@ -1344,7 +1361,7 @@ void AudioPlaybackEngine::PlayUrl(const BUrl &url, const char *title,
       // supported format rather than forcing the stream's format (see Play()).
       media_multi_audio_format format = media_multi_audio_format::wildcard;
 
-      fPlayer = new BSoundPlayer(node, &format, "Orchester", &input, &_PlayBuffer, NULL, this);
+      fPlayer = new BSoundPlayer(node, &format, kMixerName, &input, &_PlayBuffer, NULL, this);
 
       if (fPlayer && fPlayer->InitCheck() == B_OK) {
         // NOTE: the stream's resample target was already set before Open()
@@ -1367,7 +1384,7 @@ void AudioPlaybackEngine::PlayUrl(const BUrl &url, const char *title,
           errMsg.AddString("text", "Device unavailable, falling back to system default");
           fTarget.SendMessage(&errMsg);
         }
-        fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+        fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
       }
     } else {
       DEBUG_PRINT("Acquire device failed, falling back to default mixer\n");
@@ -1378,13 +1395,13 @@ void AudioPlaybackEngine::PlayUrl(const BUrl &url, const char *title,
         errMsg.AddString("text", "Device in use, falling back to system default");
         fTarget.SendMessage(&errMsg);
       }
-      fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+      fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
     }
   } else {
-    fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+    fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
   }
 #else
-  fPlayer = new BSoundPlayer(&raf, "Orchester", &_PlayBuffer, NULL, this);
+  fPlayer = new BSoundPlayer(&raf, kMixerName, &_PlayBuffer, NULL, this);
 #endif
 
   if (!fPlayer || fPlayer->InitCheck() != B_OK) {

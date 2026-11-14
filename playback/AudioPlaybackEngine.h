@@ -179,6 +179,9 @@ public:
   void SetShuffleHint(bool shuffle) { fShuffleHint.store(shuffle); }
   /** Gain applied to the current track in dB (0 when none). */
   float CurrentReplayGainDb() const { return fReplayGainDb.load(); }
+  /** Re-reads the gain of the playing track if it is @p path, as when its
+   *  loudness was just measured; the level glides to the new gain. */
+  void RefreshReplayGain(const BString &path);
   ///@}
 
   /** @name Queue Management */
@@ -288,6 +291,9 @@ private:
    *  Already limited so that the track's peak does not clip. */
   std::atomic<float> fReplayGain{1.0f};
   std::atomic<float> fReplayGainDb{0.0f};
+  /** The ReplayGain _ApplyFade last used; audio thread only. A change is
+   *  ramped over one buffer so it doesn't click. */
+  float fAppliedReplayGain = 1.0f;
   std::atomic<int32> fReplayGainMode{kReplayGainAuto};
   std::atomic<bool> fShuffleHint{false};
   std::atomic<int32> fCurrentBitrate{0};

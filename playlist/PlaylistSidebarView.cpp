@@ -1,5 +1,6 @@
 #include "PlaylistSidebarView.h"
 #include "Debug.h"
+#include "LibraryController.h"
 #include "Messages.h"
 #include "PlaylistNameDialog.h"
 #include "PlaylistLibrary.h"
@@ -285,6 +286,7 @@ void PlaylistSidebarView::MessageReceived(BMessage *msg) {
 
   case MSG_CD_RIP:
   case MSG_CD_EJECT:
+  case MSG_PASTE_INTO_FOLDER:
     fTarget.SendMessage(msg);
     break;
 
@@ -366,11 +368,18 @@ void PlaylistSidebarView::MouseDown(BPoint where) {
                                           new BMessage(MSG_DELETE_PLAYLIST)));
     } else if ((size_t)index < fRows.size() &&
                fRows[index].kind == PlaylistItemKind::Folder) {
+      const BString folderPath =
+          fManager ? fManager->FolderPathForName(clickedName) : PathAt(index);
       BMessage *open = new BMessage(MSG_OPEN_IN_TRACKER);
-      open->AddString("path", fManager ? fManager->FolderPathForName(clickedName)
-                                       : PathAt(index));
+      open->AddString("path", folderPath);
       fContextMenu->AddItem(
           new BMenuItem(B_TRANSLATE("Open in Tracker"), open));
+      BMessage *paste = new BMessage(MSG_PASTE_INTO_FOLDER);
+      paste->AddString("folder", folderPath);
+      BMenuItem *pasteItem =
+          new BMenuItem(B_TRANSLATE("Paste into Folder"), paste);
+      pasteItem->SetEnabled(LibraryController::ClipboardHasFiles());
+      fContextMenu->AddItem(pasteItem);
       fContextMenu->AddSeparatorItem();
       fContextMenu->AddItem(new BMenuItem(B_TRANSLATE("Remove"),
                                           new BMessage(MSG_DELETE_PLAYLIST)));

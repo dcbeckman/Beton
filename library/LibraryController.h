@@ -100,6 +100,14 @@ public:
   /** @brief The copy thread of DropIntoFolder() has finished. */
   void FolderCopyDone(const BMessage *msg);
 
+  /** @brief True if Tracker's Copy or Cut put files on the clipboard. */
+  static bool ClipboardHasFiles();
+  /**
+   * @brief Pastes the files Tracker copied or cut into @p folder: copied
+   *        ones are copied, cut ones moved, as DropIntoFolder() does.
+   */
+  void PasteIntoFolder(const BString &folder);
+
   /**
    * @brief Measures the loudness of the selected files on a background
    *        thread and writes ReplayGain tags into them.
@@ -119,10 +127,13 @@ public:
 
   /**
    * @brief Tells the GainPrefetcher which tracks to measure: while local
-   *        music plays, the next track and the rows on screen that have no
-   *        track gain. Called on a timer and when the setting changes.
+   *        music plays, the playing and next tracks and the rows on screen
+   *        that have no track gain. Called on a timer, when the setting
+   *        changes, when a track starts and when the list is refilled.
+   * @param listChanged The list was just refilled: queue its rows at once
+   *        instead of waiting a tick to see that it isn't being scrolled.
    */
-  void UpdateGainPrefetch();
+  void UpdateGainPrefetch(bool listChanged = false);
 
   /**
    * @brief Handles initial cache-load completion and refreshes views.

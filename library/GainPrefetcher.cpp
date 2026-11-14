@@ -27,9 +27,17 @@ void GainPrefetcher::SetWanted(const std::vector<BString> &paths,
     BAutolock guard(fLock);
     fWanted = paths;
     fPriorityCount = std::min(priority, paths.size());
-    if (!fCurrent.IsEmpty() && !fCurrentPriority &&
-        std::find(paths.begin(), paths.end(), fCurrent) == paths.end())
-      fDropCurrent.store(true);
+    if (!fCurrent.IsEmpty() && !fCurrentPriority) {
+      // A row measured in the background gives way when it scrolled off, and
+      // when the playing or next track still needs measuring: those are heard
+      // first. A dropped row is measured again later.
+      bool drop =
+          std::find(paths.begin(), paths.end(), fCurrent) == paths.end();
+      for (size_t i = 0; i < fPriorityCount && !drop; i++)
+        drop = paths[i] != fCurrent && fTried.count(paths[i]) == 0;
+      if (drop)
+        fDropCurrent.store(true);
+    }
   }
   if (!paths.empty())
     release_sem_etc(fWake, 1, B_DO_NOT_RESCHEDULE);

@@ -696,7 +696,7 @@ void LibraryController::HandleLoudnessResult(BMessage *msg) {
   BMessenger(fWindow->fMediaLibraryCache).SendMessage(&update);
 }
 
-void LibraryController::UpdateGainPrefetch() {
+void LibraryController::UpdateGainPrefetch(bool listChanged) {
   AudioPlaybackEngine *engine = fWindow->fPlaybackEngine;
   const bool active =
       fWindow->fGainPrefetch && engine != nullptr && engine->IsPlaying() &&
@@ -717,9 +717,9 @@ void LibraryController::UpdateGainPrefetch() {
                           [prefetcher]() { prefetcher->Run(); });
   }
 
-  // Library tracks without a track gain: the next track first, since the
-  // listener hears it soonest, then the current one (for next time), then
-  // the rows on screen, which the listener may skip to.
+  // Library tracks without a track gain: the playing one first, which takes
+  // its gain as soon as it is measured, then the next one, then the rows on
+  // screen, which the listener may click.
   std::vector<BString> wanted;
   std::set<BString> seen;
   auto want = [&](const BString &path) {
@@ -733,20 +733,22 @@ void LibraryController::UpdateGainPrefetch() {
   };
 
   const BString current = engine->QueuePathAt(engine->CurrentIndex());
+  want(current);
   if (fWindow->fPlaybackQueueManager != nullptr)
     want(engine->QueuePathAt(fWindow->fPlaybackQueueManager->PeekNextIndex()));
-  want(current);
   const size_t priority = wanted.size();
 
   // Rows on screen only once the list has stayed put for a tick, so
-  // scrolling through the library doesn't queue rows it only flew past.
+  // scrolling through the library doesn't queue rows it only flew past. A
+  // list that was just filled (a filter, search or sidebar choice) is
+  // where the listener stopped, so its rows are queued at once.
   MediaTableView *cv =
       fWindow->fLibraryManager ? fWindow->fLibraryManager->ContentView() : nullptr;
   std::vector<const MediaItem *> visible;
   if (cv != nullptr)
     cv->GetVisibleItems(visible);
   const BString top = visible.empty() ? BString() : visible.front()->path;
-  const bool settled = top == fGainVisibleTop;
+  const bool settled = listChanged || top == fGainVisibleTop;
   fGainVisibleTop = top;
   if (settled) {
     for (const MediaItem *mi : visible)
@@ -1647,6 +1649,10 @@ void LibraryController::HandleMediaItemFound(BMessage *msg) {
     itemToUpdate->bitrate = val;
   itemToUpdate->ReadGainFields(*msg);
   SyncGainStore(*itemToUpdate);
+  // A gain just measured for the playing track applies to it right away,
+  // rather than from the next time it plays.
+  if (msg->HasFloat("rgTrackGain") && fWindow->fPlaybackEngine != nullptr)
+    fWindow->fPlaybackEngine->RefreshReplayGain(path);
 
   if (fWindow->fLibraryManager) {
     fWindow->fLibraryManager->UpdateActiveItem(*itemToUpdate);

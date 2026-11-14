@@ -13,6 +13,8 @@
 
 #include <Alert.h>
 #include <Catalog.h>
+#include <Clipboard.h>
+#include <Messenger.h>
 #include <Directory.h>
 #include <Entry.h>
 #include <File.h>
@@ -38,10 +40,28 @@ namespace {
 const char *kPartSuffix = ".beton-part";
 const size_t kCopyBufferSize = 256 * 1024;
 
+/** How an item reaches the folder: a drop (moved on the same disk, copied
+ *  from another), or Paste after Tracker's Copy or Cut. */
+enum DropMode { kModeDrop = 0, kModeCopy = 1, kModeCut = 2 };
+
+// Tracker's clipboard (src/kits/tracker/FSClipboard.cpp, Commands.h,
+// tracker_private.h); private, so not includable.
+const uint32 kTrackerCopySelectionTo = 'Tcsl';
+const uint32 kTrackerMoveSelectionTo = 'Tmsl';
+const uint32 kTrackerDelete = 'Tdel';
+const uint32 kTrackerClipboardChanges = 'TCch';
+const int32 kTrackerClipboardNode = 'TCNR';
+const char *kTrackerSignature = "application/x-vnd.Be-TRAK";
+struct TrackerClipboardNode {
+  node_ref node;
+  uint32 moveMode;
+};
+
 struct DropItem {
   BString from;
   BString to;
-  bool sameDisk;
+  bool copy;      ///< Copied, not moved.
+  bool trashFrom; ///< Cut from another disk: the original goes to the Trash.
   bool conflict;
   bool isDir;
 };
@@ -220,22 +240,32 @@ void LibraryController::DropIntoFolder(const BMessage *msg) {
     BPath path(&entry);
     if (!entry.Exists() || path.InitCheck() != B_OK)
       continue;
-    // Already in this folder, or a folder dropped into itself.
-    BEntry parent;
-    node_ref parentRef;
-    if (entry.GetParent(&parent) == B_OK &&
-        parent.GetNodeRef(&parentRef) == B_OK && parentRef == dirRef)
-      continue;
+    const int32 mode = msg->GetInt32("mode", i, kModeDrop);
     const bool isDir = entry.IsDirectory();
+    const bool sameDisk = ref.device == dirRef.device;
+    // A folder can't go into itself.
     if (isDir && IsUnder(folder, path.Path()))
       continue;
 
     DropItem item;
     item.from = path.Path();
     item.to = BPath(folder.String(), ref.name).Path();
-    item.sameDisk = ref.device == dirRef.device;
+    item.copy = mode == kModeCopy || !sameDisk;
+    item.trashFrom = mode == kModeCut && !sameDisk;
     item.isDir = isDir;
     item.conflict = BEntry(item.to.String()).Exists();
+
+    // Already in this folder: a copy becomes a numbered duplicate, as in
+    // Tracker; anything else stays where it is.
+    BEntry parent;
+    node_ref parentRef;
+    if (entry.GetParent(&parent) == B_OK &&
+        parent.GetNodeRef(&parentRef) == B_OK && parentRef == dirRef) {
+      if (mode != kModeCopy)
+        continue;
+      item.to = UniquePath(folder.String(), ref.name, isDir);
+      item.conflict = false;
+    }
     if (item.conflict)
       conflicts++;
     items.push_back(item);
@@ -312,7 +342,7 @@ void LibraryController::DropIntoFolder(const BMessage *msg) {
                              item.isDir);
       }
     }
-    if (!item.sameDisk) {
+    if (item.copy) {
       copies.push_back(item);
       continue;
     }
@@ -372,6 +402,8 @@ void LibraryController::DropIntoFolder(const BMessage *msg) {
       const status_t status = CopyEntry(from, dir, to.Leaf(), *stop);
       if (status == B_OK) {
         done.AddString("to", item.to);
+        done.AddString("from", item.from);
+        done.AddBool("trash_from", item.trashFrom);
       } else {
         failed++;
         lastError = status;
@@ -399,21 +431,48 @@ void LibraryController::FolderCopyDone(const BMessage *msg) {
   for (int32 i = 0; msg->FindMessage("redo_before", i, &m) == B_OK; i++)
     redo.push_back(m);
   int32 copied = 0;
-  BString to;
+  BString to, from;
+  std::vector<BMessage> restoreOriginals;
   for (int32 i = 0; msg->FindString("to", i, &to) == B_OK; i++) {
     copied++;
     const BString trash = TrashPathFor(to);
-    if (trash.IsEmpty())
+    if (!trash.IsEmpty()) {
+      // Undo: the copy goes to the Trash.
+      BMessage u(MSG_FILE_MOVE);
+      u.AddString("from", to);
+      u.AddString("to", trash);
+      undo.push_back(u);
+      BMessage r(MSG_FILE_MOVE);
+      r.AddString("from", trash);
+      r.AddString("to", to);
+      redo.push_back(r);
+    }
+
+    // Cut from another disk: the original goes to the Trash (Tracker deletes
+    // it; the Trash keeps Undo possible).
+    if (!msg->GetBool("trash_from", i, false) ||
+        msg->FindString("from", i, &from) != B_OK)
+      continue;
+    const BString fromTrash = TrashPathFor(from);
+    if (fromTrash.IsEmpty())
+      continue;
+    BMessage m(MSG_FILE_MOVE);
+    m.AddString("from", from);
+    m.AddString("to", fromTrash);
+    m.AddBool("undo_replay", true);
+    HandleFileMove(&m);
+    if (!BEntry(fromTrash.String()).Exists())
       continue;
     BMessage u(MSG_FILE_MOVE);
-    u.AddString("from", to);
-    u.AddString("to", trash);
-    undo.push_back(u);
+    u.AddString("from", fromTrash);
+    u.AddString("to", from);
+    restoreOriginals.push_back(u);
     BMessage r(MSG_FILE_MOVE);
-    r.AddString("from", trash);
-    r.AddString("to", to);
+    r.AddString("from", from);
+    r.AddString("to", fromTrash);
     redo.push_back(r);
   }
+  undo.insert(undo.end(), restoreOriginals.begin(), restoreOriginals.end());
   for (int32 i = 0; msg->FindMessage("undo_after", i, &m) == B_OK; i++)
     undo.push_back(m);
   if (fWindow->fUndoManager && !undo.empty())
@@ -431,4 +490,94 @@ void LibraryController::FolderCopyDone(const BMessage *msg) {
         strerror(msg->GetInt32("error", B_ERROR)));
   }
   fWindow->UpdateStatus(status);
+}
+
+namespace {
+
+/**
+ * Reads the files Tracker put on the clipboard: for each, a ref named
+ * "r<device>_<node>" and its mode, Copy or Cut, named "m<device>_<node>".
+ * Must be called with be_clipboard locked.
+ */
+void ReadTrackerClipboard(BMessage *clip, BMessage &refs,
+                          std::vector<BString> *cutModeNames) {
+  char *name;
+  type_code type;
+  int32 count;
+  for (int32 i = 0;
+       clip->GetInfo(B_REF_TYPE, i, &name, &type, &count) == B_OK; i++) {
+    if (name[0] != 'r')
+      continue;
+    BString modeName(name);
+    modeName.SetByteAt(0, 'm');
+    int32 mode;
+    entry_ref ref;
+    if (clip->FindInt32(modeName.String(), &mode) != B_OK ||
+        clip->FindRef(name, &ref) != B_OK || !BEntry(&ref).Exists())
+      continue;
+    if (mode != (int32)kTrackerCopySelectionTo &&
+        mode != (int32)kTrackerMoveSelectionTo)
+      continue;
+    const bool cut = mode == (int32)kTrackerMoveSelectionTo;
+    refs.AddRef("refs", &ref);
+    refs.AddInt32("mode", cut ? kModeCut : kModeCopy);
+    if (cut && cutModeNames != nullptr)
+      cutModeNames->push_back(modeName);
+  }
+}
+
+} // namespace
+
+bool LibraryController::ClipboardHasFiles() {
+  BMessage refs;
+  if (!be_clipboard->Lock())
+    return false;
+  if (BMessage *clip = be_clipboard->Data())
+    ReadTrackerClipboard(clip, refs, nullptr);
+  be_clipboard->Unlock();
+  return refs.HasRef("refs");
+}
+
+void LibraryController::PasteIntoFolder(const BString &folder) {
+  BMessage drop(MSG_DROP_INTO_FOLDER);
+  drop.AddString("folder", folder);
+  if (!be_clipboard->Lock())
+    return;
+  BMessage *clip = be_clipboard->Data();
+  std::vector<BString> cutModeNames;
+  if (clip != nullptr)
+    ReadTrackerClipboard(clip, drop, &cutModeNames);
+
+  // As Tracker does after pasting: cut files become copied ones, so a second
+  // Paste copies them, and Tracker stops showing their icons dimmed.
+  if (clip != nullptr && !cutModeNames.empty()) {
+    for (const BString &modeName : cutModeNames) {
+      clip->ReplaceInt32(modeName.String(), (int32)kTrackerCopySelectionTo);
+      BString refName(modeName);
+      refName.SetByteAt(0, 'r');
+      entry_ref ref;
+      if (clip->FindRef(refName.String(), &ref) != B_OK)
+        continue;
+      BNode node(&ref);
+      TrackerClipboardNode changed;
+      if (node.GetNodeRef(&changed.node) != B_OK)
+        continue;
+      changed.moveMode = kTrackerDelete;
+      BMessage update(kTrackerClipboardChanges);
+      update.AddInt32("device", ref.device);
+      update.AddInt64("directory", ref.directory);
+      update.AddData("tcnode", kTrackerClipboardNode, &changed,
+                     sizeof(changed));
+      BMessenger(kTrackerSignature).SendMessage(&update);
+    }
+    be_clipboard->Commit();
+  }
+  be_clipboard->Unlock();
+
+  if (!drop.HasRef("refs")) {
+    fWindow->UpdateStatus(
+        B_TRANSLATE("Nothing to paste: copy or cut files in Tracker first."));
+    return;
+  }
+  DropIntoFolder(&drop);
 }

@@ -100,7 +100,8 @@ bool PlaybackMessageHandler::HandleMessage(BMessage *msg) {
 
   case MSG_GAIN_PREFETCH_TICK:
     if (fWindow->fLibraryController)
-      fWindow->fLibraryController->UpdateGainPrefetch();
+      fWindow->fLibraryController->UpdateGainPrefetch(
+          msg->GetBool("list_changed", false));
     return true;
 
   case MSG_GAIN_PREFETCH_TOGGLE:
@@ -145,6 +146,9 @@ bool PlaybackMessageHandler::HandleMessage(BMessage *msg) {
   case MSG_NOW_PLAYING: {
     if (fWindow->fPlaybackTransportController)
       fWindow->fPlaybackTransportController->HandleNowPlaying(msg);
+    // Measure a new track without gain now, not at the next tick.
+    if (fWindow->fLibraryController)
+      fWindow->fLibraryController->UpdateGainPrefetch();
     break;
   }
 

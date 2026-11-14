@@ -321,6 +321,7 @@ private:
   UndoManager *fUndoManager{nullptr};
   BMenuItem *fUndoItem = nullptr;
   BMenuItem *fRedoItem = nullptr;
+  BMenuItem *fPasteItem = nullptr;
 
   bool fRadioEnabled = false;
   bool fDlnaEnabled = false;

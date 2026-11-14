@@ -245,6 +245,8 @@
 #define MSG_ADD_TO_LIBRARY_REFS 'lbAR' ///< Add "refs" (files, folders searched recursively) to the library.
 #define MSG_DROP_INTO_FOLDER 'lbDF'  ///< "refs" dropped on a sidebar folder: move/copy them into "folder".
 #define MSG_FOLDER_COPY_DONE 'lbDC'  ///< Copy thread -> MainWindow: "to" paths copied, "failed", "error".
+#define MSG_PASTE_INTO_FOLDER 'lbPF' ///< Paste the files Tracker copied or cut into "folder".
+#define MSG_PASTE_FILES 'lbPS'       ///< Edit > Paste: into the open sidebar folder, or text into the focused field.
 #define MSG_REMOVE_MISSING 'lbRM'    ///< File menu: remove tracks whose files are gone.
 #define MSG_PLAYLIST_SAVED 'plSv'    ///< A playlist was written; its "path"s join the library.
 #define MSG_LIBRARY_RESTORE 'lbRs'   ///< Undo of a removal: put the "path"s back; "then" messages go back to the window after.

@@ -299,6 +299,25 @@ bool MainWindow::_HandleAppCommandMessage(BMessage *msg) {
     fLibraryController->DropIntoFolder(msg);
     break;
 
+  case MSG_PASTE_INTO_FOLDER: {
+    BString folder;
+    if (msg->FindString("folder", &folder) == B_OK)
+      fLibraryController->PasteIntoFolder(folder);
+    break;
+  }
+
+  case MSG_PASTE_FILES: {
+    // The menu shortcut took Alt+V from text fields; give it back.
+    if (auto *text = dynamic_cast<BTextView *>(CurrentFocus())) {
+      PostMessage(B_PASTE, text);
+      break;
+    }
+    if (fIsFolderMode && fPlaylistLibrary)
+      fLibraryController->PasteIntoFolder(
+          fPlaylistLibrary->FolderPathForName(fCurrentPlaylistName));
+    break;
+  }
+
   case MSG_FOLDER_COPY_DONE:
     fLibraryController->FolderCopyDone(msg);
     break;
@@ -351,6 +370,10 @@ void MainWindow::MenusBeginning() {
     fUndoItem->SetEnabled(fUndoManager && fUndoManager->CanUndo());
   if (fRedoItem)
     fRedoItem->SetEnabled(fUndoManager && fUndoManager->CanRedo());
+  if (fPasteItem)
+    fPasteItem->SetEnabled(
+        dynamic_cast<BTextView *>(CurrentFocus()) != nullptr ||
+        (fIsFolderMode && LibraryController::ClipboardHasFiles()));
 }
 
 void MainWindow::_HandleControlInvoked(BMessage *msg) {
@@ -739,6 +762,11 @@ void MainWindow::_BuildUI() {
   fRedoItem->SetEnabled(false);
   editMenu->AddItem(fUndoItem);
   editMenu->AddItem(fRedoItem);
+  editMenu->AddSeparatorItem();
+  // Takes over Alt+V, so text fields get it passed on (MSG_PASTE_FILES).
+  fPasteItem = new BMenuItem(B_TRANSLATE("Paste"),
+                             new BMessage(MSG_PASTE_FILES), 'V');
+  editMenu->AddItem(fPasteItem);
   editMenu->AddSeparatorItem();
   fFastEditItem = new BMenuItem(B_TRANSLATE("Enable Fast Edit"),
                                 new BMessage(MSG_TOGGLE_FAST_EDIT), 'E');
@@ -1254,6 +1282,13 @@ void MainWindow::UpdateFilteredViews(bool preserveScroll) {
     if (!fIsRadioMode && !fIsDlnaMode) {
       if (fStatusBarController)
         fStatusBarController->UpdateLibraryStatus();
+      // Measure the new rows on screen without waiting for the next tick.
+      // Posted, so it reads the rows once the list has been laid out.
+      if (!preserveScroll) {
+        BMessage tick(MSG_GAIN_PREFETCH_TICK);
+        tick.AddBool("list_changed", true);
+        PostMessage(&tick);
+      }
     }
   }
 }
