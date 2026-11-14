@@ -374,6 +374,9 @@ void MainWindow::MenusBeginning() {
     fPasteItem->SetEnabled(
         dynamic_cast<BTextView *>(CurrentFocus()) != nullptr ||
         (fIsFolderMode && LibraryController::ClipboardHasFiles()));
+  // Read-only sources: switching Fast Edit on would make their rows editable.
+  if (fFastEditItem)
+    fFastEditItem->SetEnabled(!fIsRadioMode && !fIsDlnaMode && !fIsCDMode);
 }
 
 void MainWindow::_HandleControlInvoked(BMessage *msg) {
